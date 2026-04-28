@@ -1,5 +1,5 @@
 const cron = require('node-cron');
-const prisma = require('../prisma/client');
+const prisma = require('../../prisma/client');
 const { calculateSummary, detectCategorySuggestions } = require('../engine/financialEngine');
 const { getEmotionalAnalyticsSummary } = require('../analytics/behaviorMetrics');
 const { generateDailyCoach } = require('../engine/coachEngine');

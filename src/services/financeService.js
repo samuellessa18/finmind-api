@@ -1,4 +1,4 @@
-const prisma = require('../prisma/client');
+const prisma = require('../../prisma/client');
 const { calculateProjections, calculateFinancialSummary, detectRisk } = require('../engine/financialEngine');
 
 // prisma instance imported above
