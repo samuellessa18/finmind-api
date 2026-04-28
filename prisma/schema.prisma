@@ -1,0 +1,126 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String   @id @default(cuid())
+  name            String
+  email           String   @unique
+  password        String
+  monthlyIncome   Float    @default(0.0)
+  streakDays      Int      @default(0)
+  xp              Int      @default(0)
+  level           Int      @default(1)
+  isPremium       Boolean  @default(false)
+  onboardingCompleted Boolean @default(false)
+  lastCheckIn     DateTime?
+  createdAt       DateTime @default(now())
+
+  transactions   Transaction[]
+  goals         Goal[]
+  insights      Insight[]
+  userProfile   UserProfile?
+  behaviorEvents BehaviorEvent[]
+  dailySnapshots DailySnapshot[]
+  notifications Notification[]
+  patternAlerts PatternAlert[]
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String
+  type        String   // "income" or "expense"
+  category    String
+  amount      Float
+  date        DateTime
+  description String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Goal {
+  id              String   @id @default(cuid())
+  userId          String
+  title           String
+  type            String   @default("general") // viagem, casa, carro
+  targetAmount    Float
+  currentAmount   Float    @default(0)
+  deadline        DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Insight {
+  id        String   @id @default(cuid())
+  userId    String
+  message   String
+  type      String   // "warning", "suggestion", "achievement"
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DailySnapshot {
+  id                String   @id @default(cuid())
+  userId            String
+  balance           Float
+  monthlyExpenses   Float
+  savingsRate       Float
+  riskLevel         String
+  predictedExpenses Float
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String?
+  message   String
+  type      String
+  priority  String   @default("low")
+  read      Boolean  @default(false)
+  sendAt    DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  spendingPattern String
+  riskTolerance   String
+  lastUpdated     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PatternAlert {
+  id            String   @id @default(cuid())
+  userId        String
+  category      String
+  percentage    Float
+  message       String
+  severity      String   // "low", "medium", "high"
+  detectedAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model BehaviorEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  category  String?
+  data      String?  // additional data as JSON string (SQLite doesn't support Json type)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
