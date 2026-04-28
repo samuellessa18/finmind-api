@@ -1,8 +1,6 @@
 const cron = require('node-cron');
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../../prisma/client');
 const { calculateSummary } = require('./financialEngine');
-
-const prisma = new PrismaClient();
 
 function isSameDay(dateA, dateB) {
   const a = new Date(dateA);
