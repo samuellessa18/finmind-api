@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../prisma/client');
+// prisma instance imported above
 
 // Track behavior events
 async function trackEvent(userId, type, category = null, data = null) {

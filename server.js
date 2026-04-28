@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('./prisma/client');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const OpenAI = require('openai');
@@ -16,7 +16,7 @@ const financeRoutes = require('./src/routes/financeRoutes');
 dotenv.config();
 
 const app = express();
-const prisma = new PrismaClient();
+// prisma instance is now imported from prisma/client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const authLimiter = rateLimit({
@@ -34,17 +34,19 @@ const insightsLimiter = rateLimit({
 app.use(cors({
   origin: [
     'http://localhost:5173',
-    process.env.FRONTEND_URL || ''
+    'http://localhost:19006',
+    process.env.FRONTEND_URL
   ].filter(Boolean),
   credentials: true
 }));
 app.use(express.json());
 
-// 🩺 Health Check
+// 🩺 Health Check & Diagnostics
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
     env: process.env.NODE_ENV || 'development'
   });
 });
@@ -790,9 +792,35 @@ app.get('/api/analytics/timeline', authenticateToken, async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-  startDailyAnalysisJob();
-  startNotificationScheduler();
+// 🚀 Global Error Handler (SaaS Safety Net)
+app.use((err, req, res, next) => {
+  console.error(`[Global Error]: ${err.stack}`);
+  res.status(err.status || 500).json({
+    error: 'Erro interno no servidor',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Algo deu errado. Tente novamente mais tarde.'
+  });
 });
+
+const PORT = process.env.PORT || 5000;
+
+async function startServer() {
+  try {
+    await prisma.$connect();
+    console.log('✅ Conexão com o banco de dados PostgreSQL estabelecida.');
+    
+    app.listen(PORT, () => {
+      console.log('--------------------------------------------------');
+      console.log(`🚀 FinMind API iniciada com sucesso!`);
+      console.log(`📍 Porta: ${PORT}`);
+      console.log('--------------------------------------------------');
+      startDailyAnalysisJob();
+      startNotificationScheduler();
+    });
+  } catch (error) {
+    console.error('❌ ERRO CRÍTICO: Não foi possível conectar ao banco de dados.');
+    console.error(error);
+    process.exit(1);
+  }
+}
+
+startServer();

@@ -1,7 +1,7 @@
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../prisma/client');
 const { calculateProjections, calculateFinancialSummary, detectRisk } = require('../engine/financialEngine');
 
-const prisma = new PrismaClient();
+// prisma instance imported above
 
 async function getDetailedChartData(userId) {
     const user = await prisma.user.findUnique({

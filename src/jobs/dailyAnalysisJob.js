@@ -1,10 +1,10 @@
 const cron = require('node-cron');
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../prisma/client');
 const { calculateSummary, detectCategorySuggestions } = require('../engine/financialEngine');
 const { getEmotionalAnalyticsSummary } = require('../analytics/behaviorMetrics');
 const { generateDailyCoach } = require('../engine/coachEngine');
 
-const prisma = new PrismaClient();
+// prisma instance imported above
 
 function isSameDay(dateA, dateB) {
   const a = new Date(dateA);
