@@ -20,7 +20,9 @@ model User {
   onboardingCompleted Boolean @default(false)
   lastCheckIn     DateTime?
   createdAt       DateTime @default(now())
-
+  environmentId   String?
+  environment     Environment? @relation(fields: [environmentId], references: [id])
+  
   transactions   Transaction[]
   goals         Goal[]
   insights      Insight[]
@@ -29,6 +31,13 @@ model User {
   dailySnapshots DailySnapshot[]
   notifications Notification[]
   patternAlerts PatternAlert[]
+}
+
+model Environment {
+  id        String   @id @default(cuid())
+  name      String
+  users     User[]
+  createdAt DateTime @default(now())
 }
 
 model Transaction {

@@ -155,15 +155,20 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
 
   try {
     const hashedPassword = await bcrypt.hash(result.data.password, 10);
+    const environment = await prisma.environment.create({
+      data: { name: `Ambiente de ${result.data.name}` }
+    });
+
     const user = await prisma.user.create({
       data: {
         name: result.data.name,
         email: result.data.email,
         password: hashedPassword,
-        monthlyIncome: result.data.monthlyIncome
+        monthlyIncome: result.data.monthlyIncome,
+        environmentId: environment.id
       }
     });
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET);
+    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, process.env.JWT_SECRET);
     res.json({ user, token });
   } catch (error) {
     res.status(400).json({ error: 'Erro ao registrar usuário' });
@@ -180,7 +185,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     if (!user || !(await bcrypt.compare(result.data.password, user.password))) {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET);
+    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, process.env.JWT_SECRET);
     res.json({ user, token });
   } catch (error) {
     res.status(400).json({ error: 'Erro ao fazer login' });
