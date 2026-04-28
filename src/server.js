@@ -42,15 +42,27 @@ app.use(cors({
 app.use(express.json());
 
 // 🩺 Health Check & Diagnostics (Production)
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    uptime: Math.round(process.uptime()),
-    env: process.env.NODE_ENV || 'development',
-    version: '1.0.0',
-    database: 'connected'
-  });
+app.get('/api/health', async (req, res) => {
+  try {
+    // Definitive test: a real query to the database
+    await prisma.$queryRaw`SELECT 1`;
+
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      uptime: Math.round(process.uptime()),
+      env: process.env.NODE_ENV || 'production',
+      version: '1.0.0',
+      database: 'connected'
+    });
+  } catch (error) {
+    console.error('[Health Check Error]:', error.message);
+    res.status(500).json({ 
+      status: 'error', 
+      database: 'disconnected',
+      message: 'Falha na conexão com o banco de dados'
+    });
+  }
 });
 
 // Main Modular Routes
