@@ -32,10 +32,22 @@ const insightsLimiter = rateLimit({
 });
 
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: [
+    'http://localhost:5173',
+    process.env.FRONTEND_URL || ''
+  ].filter(Boolean),
   credentials: true
 }));
 app.use(express.json());
+
+// 🩺 Health Check
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV || 'development'
+  });
+});
 
 // Main Modular Routes
 app.use('/api/finance', financeRoutes);
