@@ -12,12 +12,15 @@ const { startDailyAnalysisJob, runDailyAnalysis } = require('./jobs/dailyAnalysi
 const { startNotificationScheduler } = require('./engine/notificationScheduler');
 const { trackEvent, getAnalyticsSummary, getEmotionalAnalyticsSummary, getPersonalTimeline } = require('./analytics/behaviorMetrics');
 const { addXP } = require('./services/gamificationService');
+const { loadUserById, tenantWhere } = require('./services/tenantService');
 const financeRoutes = require('./routes/financeRoutes');
 dotenv.config();
 
 const app = express();
 // prisma instance is now imported from prisma/client
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openaiApiKey = process.env.OPENAI_API_KEY?.trim();
+const openai = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
+const isOpenAIConfigured = Boolean(openaiApiKey);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -31,14 +34,31 @@ const insightsLimiter = rateLimit({
   message: { error: 'Muitas solicitações de insights, aguarde um minuto.' }
 });
 
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:19006',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:19006',
-    process.env.FRONTEND_URL
-  ].filter(Boolean),
-  credentials: true
+  origin: function (origin, callback) {
+    // Permite requisições sem origin (ex: Postman, curl, mobile)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn('[CORS] Bloqueado:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token']
 }));
+
+// Garante resposta imediata para preflight OPTIONS
+app.options('*', cors());
 app.use(express.json());
 
 // 🩺 Health Check & Diagnostics (Production)
@@ -53,7 +73,8 @@ app.get('/api/health', async (req, res) => {
       uptime: Math.round(process.uptime()),
       env: process.env.NODE_ENV || 'production',
       version: '1.0.0',
-      database: 'connected'
+      database: 'connected',
+      openai: isOpenAIConfigured ? 'configured' : 'missing'
     });
   } catch (error) {
     console.error('[Health Check Error]:', error.message);
@@ -67,15 +88,25 @@ app.get('/api/health', async (req, res) => {
 
 // Main Modular Routes
 app.use('/api/finance', financeRoutes);
-const authenticateToken = (req, res, next) => {
+const authenticateToken = async (req, res, next) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Acesso negado' });
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Token inválido' });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (!decoded || typeof decoded !== 'object' || !decoded.id) {
+      return res.status(403).json({ error: 'Token inválido' });
+    }
+
+    const user = await loadUserById(decoded.id);
+    if (!user) return res.status(401).json({ error: 'Usuário inválido' });
+
     req.user = user;
     next();
-  });
+  } catch (error) {
+    console.error('[Auth Error]', error.message);
+    return res.status(403).json({ error: 'Token inválido ou expirado' });
+  }
 };
 
 const registerSchema = z.object({
@@ -169,7 +200,8 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       }
     });
     const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, process.env.JWT_SECRET);
-    res.json({ user, token });
+    const { password, ...safeUser } = user;
+    res.json({ user: safeUser, token });
   } catch (error) {
     res.status(400).json({ error: 'Erro ao registrar usuário' });
   }
@@ -186,7 +218,8 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
     const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, process.env.JWT_SECRET);
-    res.json({ user, token });
+    const { password, ...safeUser } = user;
+    res.json({ user: safeUser, token });
   } catch (error) {
     res.status(400).json({ error: 'Erro ao fazer login' });
   }
@@ -194,7 +227,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
 
 app.get('/api/transactions', authenticateToken, async (req, res) => {
   try {
-    const transactions = await prisma.transaction.findMany({ where: { userId: req.user.id } });
+    const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
     res.json(transactions);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar transações' });
@@ -307,7 +340,7 @@ app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
 
 app.get('/api/goals', authenticateToken, async (req, res) => {
   try {
-    const goals = await prisma.goal.findMany({ where: { userId: req.user.id } });
+    const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
     res.json(goals);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar metas' });
@@ -347,7 +380,7 @@ app.put('/api/goals/:id', authenticateToken, async (req, res) => {
 
   try {
     const goal = await prisma.goal.update({
-      where: { id: req.params.id, userId: req.user.id },
+      where: { id: req.params.id, ...tenantWhere(req.user) },
       data: {
         title: result.data.title,
         type: req.body.type,
@@ -367,7 +400,7 @@ app.put('/api/goals/:id', authenticateToken, async (req, res) => {
 app.get('/api/insights', authenticateToken, async (req, res) => {
   try {
     const insights = await prisma.insight.findMany({
-      where: { userId: req.user.id },
+      where: { ...tenantWhere(req.user) },
       orderBy: { createdAt: 'desc' }
     });
     res.json(insights);
@@ -379,8 +412,8 @@ app.get('/api/insights', authenticateToken, async (req, res) => {
 app.post('/api/insights/generate', authenticateToken, insightsLimiter, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, include: { userProfile: true } });
-    const transactions = await prisma.transaction.findMany({ where: { userId: req.user.id } });
-    const goals = await prisma.goal.findMany({ where: { userId: req.user.id } });
+    const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
+    const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
     const summary = calculateSummary(user, transactions, goals);
     const profile = user.userProfile || summary.userProfile || { spendingPattern: 'controlado', riskTolerance: 'médio' };
 
@@ -430,6 +463,10 @@ EXEMPLOS DE BOAS RESPOSTAS:
 
 AGORA, CRIE UMA MENSAGEM PERSONALIZADA:`;
 
+    if (!openai) {
+      return res.status(503).json({ error: 'Serviço de IA temporariamente indisponível' });
+    }
+
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: [{ role: 'user', content: prompt }],
@@ -454,8 +491,8 @@ AGORA, CRIE UMA MENSAGEM PERSONALIZADA:`;
 app.get('/api/score', authenticateToken, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-    const transactions = await prisma.transaction.findMany({ where: { userId: req.user.id } });
-    const goals = await prisma.goal.findMany({ where: { userId: req.user.id } });
+    const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
+    const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
     const summary = calculateSummary(user, transactions, goals);
     res.json({ score: summary.score, savingsRate: summary.savingsRate, riskLevel: summary.riskLevel });
   } catch (error) {
@@ -469,8 +506,8 @@ app.get('/api/users/profile', authenticateToken, async (req, res) => {
       where: { id: req.user.id },
       include: { userProfile: true }
     });
-    const transactions = await prisma.transaction.findMany({ where: { userId: req.user.id } });
-    const goals = await prisma.goal.findMany({ where: { userId: req.user.id } });
+    const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
+    const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
     const summary = calculateSummary(user, transactions, goals);
     const profile = user.userProfile || {};
     res.json({
@@ -497,7 +534,7 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
 
   try {
     const profile = await prisma.userProfile.upsert({
-      where: { userId: req.user.id },
+      where: { ...tenantWhere(req.user) },
       create: {
         userId: req.user.id,
         spendingPattern: result.data.spendingPattern,
@@ -617,8 +654,8 @@ app.post('/api/finance/simulate', authenticateToken, async (req, res) => {
 
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-    const transactions = await prisma.transaction.findMany({ where: { userId: req.user.id } });
-    const goals = await prisma.goal.findMany({ where: { userId: req.user.id } });
+    const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
+    const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
     const summary = calculateSummary(user, transactions, goals);
 
     // Track simulation usage
@@ -666,7 +703,7 @@ app.post('/api/finance/simulate', authenticateToken, async (req, res) => {
 app.get('/api/notifications', authenticateToken, async (req, res) => {
   try {
     const notifications = await prisma.notification.findMany({
-      where: { userId: req.user.id },
+      where: { ...tenantWhere(req.user) },
       orderBy: { createdAt: 'desc' },
       take: 20
     });
@@ -678,12 +715,21 @@ app.get('/api/notifications', authenticateToken, async (req, res) => {
 
 app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
   try {
-    const notification = await prisma.notification.update({
-      where: { id: req.params.id },
+    const result = await prisma.notification.updateMany({
+      where: { id: req.params.id, ...tenantWhere(req.user) },
       data: { read: true }
     });
+    if (result.count === 0) {
+      return res.status(404).json({ error: 'Notificação não encontrada' });
+    }
+
+    const notification = await prisma.notification.findFirst({
+      where: { id: req.params.id, ...tenantWhere(req.user) }
+    });
+
     res.json(notification);
   } catch (error) {
+    console.error('[Notification Update Error]', error.message);
     res.status(400).json({ error: 'Erro ao marcar notificação como lida' });
   }
 });
@@ -691,7 +737,7 @@ app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
 app.get('/api/patterns', authenticateToken, async (req, res) => {
   try {
     const patterns = await prisma.patternAlert.findMany({
-      where: { userId: req.user.id },
+      where: { ...tenantWhere(req.user) },
       orderBy: { detectedAt: 'desc' }
     });
     res.json(patterns);
