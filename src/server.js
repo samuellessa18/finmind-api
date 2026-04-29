@@ -103,9 +103,11 @@ const authenticateToken = async (req, res, next) => {
   if (!token) return res.status(401).json({ error: 'Acesso negado' });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const secret = process.env.JWT_SECRET || 'test_secret_for_development';
+    const decoded = jwt.verify(token, secret);
+    
     if (!decoded || typeof decoded !== 'object' || !decoded.id) {
-      return res.status(403).json({ error: 'Token inválido' });
+      return res.status(401).json({ error: 'Token inválido' });
     }
 
     const user = await loadUserById(decoded.id);
@@ -115,7 +117,8 @@ const authenticateToken = async (req, res, next) => {
     next();
   } catch (error) {
     console.error('[Auth Error]', error.message);
-    return res.status(403).json({ error: 'Token inválido ou expirado' });
+    // Retornamos 401 para que o frontend saiba que deve deslogar o usuário
+    return res.status(401).json({ error: 'Token inválido ou expirado' });
   }
 };
 
@@ -209,7 +212,8 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
         environmentId: environment.id
       }
     });
-    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, process.env.JWT_SECRET);
+    const secret = process.env.JWT_SECRET || 'test_secret_for_development';
+    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, secret);
     const { password, ...safeUser } = user;
     res.json({ user: safeUser, token });
   } catch (error) {
@@ -227,7 +231,8 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     if (!user || !(await bcrypt.compare(result.data.password, user.password))) {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
-    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, process.env.JWT_SECRET);
+    const secret = process.env.JWT_SECRET || 'test_secret_for_development';
+    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, secret);
     const { password, ...safeUser } = user;
     res.json({ user: safeUser, token });
   } catch (error) {
