@@ -34,31 +34,41 @@ const insightsLimiter = rateLimit({
   message: { error: 'Muitas solicitações de insights, aguarde um minuto.' }
 });
 
+// URLs permitidas — hardcoded + env var do Render
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:19006',
-  process.env.FRONTEND_URL
+  'https://finan-as-pessoais-seven.vercel.app', // produção hardcoded
+  process.env.FRONTEND_URL                        // env var do Render (opcional)
 ].filter(Boolean);
 
-app.use(cors({
+console.log('[CORS] Origens permitidas:', allowedOrigins);
+
+const corsOptions = {
   origin: function (origin, callback) {
-    // Permite requisições sem origin (ex: Postman, curl, mobile)
+    console.log('[CORS] Origin recebida:', origin);
+
+    // Sem origin → Postman / curl / mobile → OK
     if (!origin) return callback(null, true);
 
+    // Qualquer subdomínio *.vercel.app → OK (preview deploys)
+    if (origin.endsWith('.vercel.app')) return callback(null, true);
+
     if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.warn('[CORS] Bloqueado:', origin);
-      callback(new Error('Not allowed by CORS'));
+      return callback(null, true);
     }
+
+    console.warn('[CORS] BLOQUEADO:', origin);
+    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token']
-}));
+};
 
-// Garante resposta imediata para preflight OPTIONS
-app.options('*', cors());
+// Preflight OPTIONS deve ser respondido ANTES de qualquer middleware
+app.options('*', cors(corsOptions));
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // 🩺 Health Check & Diagnostics (Production)
