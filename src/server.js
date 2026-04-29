@@ -42,11 +42,11 @@ const allowedOrigins = [
   process.env.FRONTEND_URL                        // env var do Render (opcional)
 ].filter(Boolean);
 
-console.log('[CORS] Origens permitidas:', allowedOrigins);
+// console.log('[CORS] Origens permitidas:', allowedOrigins);
 
 const corsOptions = {
   origin: function (origin, callback) {
-    console.log('[CORS] Origin recebida:', origin);
+    // console.log('[CORS] Origin recebida:', origin);
 
     // Sem origin → Postman / curl / mobile → OK
     if (!origin) return callback(null, true);
@@ -58,7 +58,7 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    console.warn('[CORS] BLOQUEADO:', origin);
+    console.error('[CORS] BLOQUEADO:', origin);
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -908,8 +908,10 @@ async function startServer() {
       startNotificationScheduler();
     });
   } catch (error) {
-    console.error('❌ ERRO CRÍTICO: Não foi possível conectar ao banco de dados.');
-    console.error(error);
+    console.error('❌ ERRO CRÍTICO NO STARTUP:');
+    console.error('Mensagem:', error.message);
+    if (error.code) console.error('Código Prisma:', error.code);
+    console.error('Trace:', error.stack);
     process.exit(1);
   }
 }
