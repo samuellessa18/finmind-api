@@ -872,6 +872,39 @@ app.get('/api/analytics/timeline', authenticateToken, async (req, res) => {
   }
 });
 
+app.delete('/api/user/reset', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log(`🧹 Iniciando reset de dados solicitado pelo usuário: ${userId}`);
+
+    // Ordem para respeitar FKs
+    await prisma.notification.deleteMany({ where: { userId } });
+    await prisma.insight.deleteMany({ where: { userId } });
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.goal.deleteMany({ where: { userId } });
+    await prisma.dailySnapshot.deleteMany({ where: { userId } });
+    await prisma.patternAlert.deleteMany({ where: { userId } });
+    await prisma.behaviorEvent.deleteMany({ where: { userId } });
+    await prisma.userProfile.deleteMany({ where: { userId } });
+
+    // Reset XP and level in User table
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        xp: 0,
+        level: 1,
+        streakDays: 0,
+        lastCheckIn: null
+      }
+    });
+
+    res.json({ message: 'Seus dados foram resetados com sucesso.' });
+  } catch (error) {
+    console.error('[User Reset Error]:', error);
+    res.status(500).json({ error: 'Erro ao resetar seus dados. Tente novamente mais tarde.' });
+  }
+});
+
 // 🚀 Global Error Handler (SaaS Safety Net)
 app.use((err, req, res, next) => {
   console.error(`[Global Error]: ${err.stack}`);
