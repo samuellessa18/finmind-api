@@ -130,7 +130,7 @@ function translatePreventionRate(cancelRate) {
   if (rate >= 50) return `🧠 Você evitou quase metade dos gastos impulsivos`;
   if (rate >= 30) return `🧠 Você evitou ${rate}% dos gastos de risco — ótimo sinal`;
   if (rate >= 10) return `🧠 Você está começando a evitar gastos impulsivos`;
-  return `🧠 Ainda há espaço para melhorar o controle de gastos`;
+  return null;
 }
 
 function translateSmartEngagement(smartEngagementRate) {
@@ -138,7 +138,7 @@ function translateSmartEngagement(smartEngagementRate) {
   if (rate >= 50) return `🔍 Você reflete antes de gastar — sinal de maturidade financeira`;
   if (rate >= 25) return `🔍 Você usa simulações quando alertado — comportamento inteligente`;
   if (rate >= 10) return `🔍 Às vezes você reflete antes de decidir — continue assim`;
-  return `🔍 Use as simulações para tomar decisões mais conscientes`;
+  return null;
 }
 
 function translateConsistency(averageStreak) {
@@ -147,14 +147,14 @@ function translateConsistency(averageStreak) {
   if (streak >= 5) return `🔥 ${streak} dias seguidos no controle — você está no caminho`;
   if (streak >= 3) return `🔥 ${streak} dias de disciplina — mantenha o ritmo`;
   if (streak >= 1) return `🔥 Você começou a criar hábitos — continue assim`;
-  return `🔥 Comece hoje criando uma rotina de check-in diário`;
+  return null;
 }
 
 function translateWeeklyCancelled(weeklyCancelled) {
   if (weeklyCancelled >= 5) return `Você evitou ${weeklyCancelled} gastos impulsivos`;
   if (weeklyCancelled >= 3) return `Você evitou ${weeklyCancelled} gastos impulsivos`;
   if (weeklyCancelled >= 1) return `Você evitou ${weeklyCancelled} gasto impulsivo`;
-  return `Você ainda não evitou gastos impulsivos essa semana`;
+  return null;
 }
 
 function calculateImprovement(metrics, previousMetrics) {
@@ -173,20 +173,21 @@ function calculateImprovement(metrics, previousMetrics) {
 
 // Generate weekly smart summary
 function generateWeeklySummary(metrics, improvement = null) {
-  const prevention = translateWeeklyCancelled(metrics.weeklyCancelled);
-  const consistency = translateConsistency(metrics.averageStreak);
-  const engagement = translateSmartEngagement(metrics.smartEngagementRate);
+  const highlights = [
+    translateWeeklyCancelled(metrics.weeklyCancelled),
+    translateConsistency(metrics.averageStreak),
+    translateSmartEngagement(metrics.smartEngagementRate)
+  ].filter(Boolean); // Remove nulos
+
+  if (highlights.length === 0) return null;
+
   const improvementText = improvement || 'Continue monitorando seu progresso';
 
   return {
     title: '📊 Sua semana financeira:',
-    highlights: [
-      prevention,
-      consistency,
-      engagement
-    ],
+    highlights,
     conclusion: `🎯 ${improvementText} — você está no caminho certo`,
-    fullMessage: `📊 Sua semana financeira:\n\n${prevention}\n${consistency}\n${engagement}\n\n🎯 ${improvementText} — você está no caminho certo`
+    fullMessage: `📊 Sua semana financeira:\n\n${highlights.join('\n')}\n\n🎯 ${improvementText} — você está no caminho certo`
   };
 }
 
