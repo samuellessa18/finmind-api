@@ -150,6 +150,17 @@ v1Router.use('/auth', authRoutes);
 app.use('/api/v1', v1Router);
 
 
+const registerSchema = z.object({
+  name: z.string().min(2),
+  email: z.string().email(),
+  password: z.string().min(6),
+  monthlyIncome: z.number().nonnegative().optional().default(0)
+});
+
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6)
+});
 
 const transactionSchema = z.object({
   type: z.enum(['income', 'expense']),
@@ -187,6 +198,13 @@ const onboardingSchema = z.object({
   })
 });
 
+const parseRequest = (schema, data) => {
+  try {
+    return { success: true, data: schema.parse(data) };
+  } catch (error) {
+    return { success: false, errors: error.errors.map((err) => err.message) };
+  }
+};
 
 
 function startOfDay(date) {
