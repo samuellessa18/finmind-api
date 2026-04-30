@@ -11,7 +11,8 @@ async function loadUserById(userId) {
       onboardingCompleted: true,
       streakDays: true,
       xp: true,
-      level: true
+      level: true,
+      plan: true
     }
   });
 }

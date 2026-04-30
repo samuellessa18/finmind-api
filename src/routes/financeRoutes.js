@@ -1,37 +1,26 @@
 const express = require('express');
 const { getDetailedChartData, getGeneralSummary } = require('../services/financeService');
+const { authenticateToken } = require('../middleware/auth');
+
+const lightCache = require('../middleware/cache');
 
 const router = express.Router();
 
-const jwt = require('jsonwebtoken');
-
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (!token) return res.status(401).json({ error: "Missing token" });
-
-    jwt.verify(token, process.env.JWT_SECRET || 'test_secret_for_development', (err, user) => {
-        if (err) return res.status(403).json({ error: "Invalid token" });
-        req.user = user;
-        next();
-    });
-};
-
-router.get('/summary', authenticateToken, async (req, res) => {
+router.get('/summary', authenticateToken, lightCache(60), async (req, res, next) => {
     try {
         const summary = await getGeneralSummary(req.user.id);
-        res.status(200).json(summary);
+        res.json(summary);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        next(error);
     }
 });
 
-router.get('/chart', authenticateToken, async (req, res) => {
+router.get('/chart', authenticateToken, async (req, res, next) => {
     try {
         const chart = await getDetailedChartData(req.user.id);
-        res.status(200).json(chart);
+        res.json(chart);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        next(error);
     }
 });
 

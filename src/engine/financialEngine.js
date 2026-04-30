@@ -16,15 +16,15 @@ function calculateFinancialSummary(transactions, monthlyIncome) {
         }
     });
 
+    const totalBalance = totalIncome - totalExpenses;
     const incomeToUse = monthlyIncome || totalIncome;
-    const balance = incomeToUse - totalExpenses;
-    const savingsRate = incomeToUse > 0 ? (balance / incomeToUse) * 100 : 0;
+    const savingsRate = incomeToUse > 0 ? (totalBalance / incomeToUse) * 100 : 0;
 
     return {
         totalExpenses,
         totalIncome,
+        totalBalance,
         incomeToUse,
-        balance,
         savingsRate
     };
 }
@@ -92,8 +92,9 @@ function calculateSummary(user, transactions, goals) {
         riskLevel: risk.level.toUpperCase(),
         riskMessage: risk.message,
         percentageMonthUsed: (summary.totalExpenses / monthlyIncome) * 100,
-        trend: 0, // Simplified for now
-        trendDirection: 'stable',
+        balance: summary.totalBalance,
+        trend: null, 
+        trendDirection: null,
         goalProjections,
         userProfile: {
             spendingPattern: summary.savingsRate > 20 ? 'SAVER' : 'SPENDER',

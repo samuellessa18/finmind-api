@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -11,12 +11,16 @@ model User {
   id              String   @id @default(cuid())
   name            String
   email           String   @unique
-  password        String
+  password        String?
+  provider        String   @default("local") // "local" | "google" | "hybrid"
+  googleId        String?  @unique
+  avatarUrl       String?
   monthlyIncome   Float    @default(0.0)
   streakDays      Int      @default(0)
   xp              Int      @default(0)
   level           Int      @default(1)
   isPremium       Boolean  @default(false)
+  plan            String   @default("free") // "free" | "pro"
   onboardingCompleted Boolean @default(false)
   lastCheckIn     DateTime?
   createdAt       DateTime @default(now())
@@ -27,10 +31,12 @@ model User {
   goals         Goal[]
   insights      Insight[]
   userProfile   UserProfile?
-  behaviorEvents BehaviorEvent[]
   dailySnapshots DailySnapshot[]
   notifications Notification[]
   patternAlerts PatternAlert[]
+  aiUsage       AIUsage[]
+  events        Event[]
+  growthActions GrowthAction[]
 }
 
 model Environment {
@@ -123,13 +129,46 @@ model PatternAlert {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
-model BehaviorEvent {
+model Event {
   id        String   @id @default(cuid())
-  userId    String
+  userId    String?
   type      String
   category  String?
-  data      String?  // additional data as JSON string (SQLite doesn't support Json type)
+  metadata  String?  // JSON stringified for SQLite compatibility
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model AIUsage {
+  id        String   @id @default(cuid())
+  userId    String
+  date      DateTime @default(now()) // Normalized to YYYY-MM-DD
+  count     Int      @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+}
+model AuthCode {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model GrowthAction {
+  id        String   @id @default(cuid())
+  userId    String
+  ruleKey   String   @default("legacy")
+  type      String
+  channel   String?  @default("notification")
+  metadata  String?
+  status    String   @default("pending")
+  isShadow  Boolean  @default(true)
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
+

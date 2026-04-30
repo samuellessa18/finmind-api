@@ -13,10 +13,32 @@ const { startNotificationScheduler } = require('./engine/notificationScheduler')
 const { trackEvent, getAnalyticsSummary, getEmotionalAnalyticsSummary, getPersonalTimeline } = require('./analytics/behaviorMetrics');
 const { addXP } = require('./services/gamificationService');
 const { loadUserById, tenantWhere } = require('./services/tenantService');
+const { trackTelemetry } = require('./services/telemetryService');
 const financeRoutes = require('./routes/financeRoutes');
+const adminRoutes = require('./routes/adminRoutes');
+const growthRoutes = require('./routes/growthRoutes');
+const authRoutes = require('./routes/authRoutes');
+const { runGrowthEngine } = require('./services/growthEngineService');
+const cron = require('node-cron');
+const usageLimiter = require('./middleware/usageLimiter');
+const crypto = require('crypto');
+const { verifyGoogleToken, findOrCreateGoogleUser } = require('./services/googleAuth');
+const axios = require('axios');
 dotenv.config();
 
+// 🚀 VALIDAÇÃO CRÍTICA DE STARTUP
+const requiredEnv = ['DATABASE_URL', 'JWT_SECRET', 'NODE_ENV'];
+const missingEnv = requiredEnv.filter(env => !process.env[env]);
+if (missingEnv.length > 0) {
+  console.error('\n❌ ERRO CRÍTICO DE CONFIGURAÇÃO:');
+  console.error(`As seguintes variáveis de ambiente são obrigatórias: ${missingEnv.join(', ')}`);
+  console.error('Abortando inicialização do servidor...\n');
+  process.exit(1);
+}
+
 const app = express();
+const { authenticateToken } = require('./middleware/auth');
+
 // prisma instance is now imported from prisma/client
 const openaiApiKey = process.env.OPENAI_API_KEY?.trim();
 const openai = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
@@ -24,8 +46,8 @@ const isOpenAIConfigured = Boolean(openaiApiKey);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 8,
-  message: { error: 'Muitas tentativas, tente novamente mais tarde.' }
+  max: 10, // Ajustado ligeiramente
+  message: { error: 'Muitas tentativas de autenticação, tente novamente em 15 minutos.' }
 });
 
 const insightsLimiter = rateLimit({
@@ -34,105 +56,100 @@ const insightsLimiter = rateLimit({
   message: { error: 'Muitas solicitações de insights, aguarde um minuto.' }
 });
 
-// URLs permitidas — hardcoded + env var do Render
+// URLs permitidas — Agora mais robusto para produção
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:19006',
-  'https://finan-as-pessoais-seven.vercel.app', // produção hardcoded
-  process.env.FRONTEND_URL                        // env var do Render (opcional)
+  'https://finan-as-pessoais-seven.vercel.app',
+  'https://finmind.vercel.app', // Novo domínio sugerido
+  process.env.FRONTEND_URL
 ].filter(Boolean);
-
-// console.log('[CORS] Origens permitidas:', allowedOrigins);
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // console.log('[CORS] Origin recebida:', origin);
-
-    // Sem origin → Postman / curl / mobile → OK
+    // Sem origin → Mobile apps ou ferramentas de teste locais → OK
     if (!origin) return callback(null, true);
 
-    // Qualquer subdomínio *.vercel.app → OK (preview deploys)
-    if (origin.endsWith('.vercel.app')) return callback(null, true);
+    // Permitir qualquer subdomínio do Vercel (Preview Deploys)
+    if (origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
 
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
-    console.error('[CORS] BLOQUEADO:', origin);
-    return callback(new Error('Not allowed by CORS'));
+    console.warn(`[SECURITY] Bloqueio de CORS para origem não autorizada: ${origin}`);
+    return callback(new Error('Acesso não permitido por política de CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token']
 };
 
-// Preflight OPTIONS deve ser respondido ANTES de qualquer middleware
+// Preflight e Middleware CORS
 app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// 🩺 Health Check & Diagnostics (Production)
+const requestLogger = require('./middleware/requestLogger');
+const errorHandler = require('./middleware/errorHandler');
+const lightCache = require('./middleware/cache');
+
+// 📊 LOGS ESTRUTURADOS (Primeiro middleware para capturar tudo)
+app.use(requestLogger);
+
+// 🩺 Health Check & Diagnostics (Sem autenticação por ser endpoint de infra)
 app.get('/api/health', async (req, res) => {
-  try {
-    // Definitive test: a real query to the database
-    await prisma.$queryRaw`SELECT 1`;
-
-    res.json({ 
-      status: 'ok', 
-      timestamp: new Date().toISOString(),
-      uptime: Math.round(process.uptime()),
-      env: process.env.NODE_ENV || 'production',
-      version: '1.0.0',
-      database: 'connected',
-      openai: isOpenAIConfigured ? 'configured' : 'missing'
-    });
-  } catch (error) {
-    console.error('[Health Check Error]:', error.message);
-    res.status(500).json({ 
-      status: 'error', 
-      database: 'disconnected',
-      message: 'Falha na conexão com o banco de dados'
-    });
-  }
-});
-
-// Main Modular Routes
-app.use('/api/finance', financeRoutes);
-const authenticateToken = async (req, res, next) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) return res.status(401).json({ error: 'Acesso negado' });
-
-  try {
-    const secret = process.env.JWT_SECRET || 'test_secret_for_development';
-    const decoded = jwt.verify(token, secret);
-    
-    if (!decoded || typeof decoded !== 'object' || !decoded.id) {
-      return res.status(401).json({ error: 'Token inválido' });
+  const health = { 
+    success: true,
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV,
+    checks: {
+      database: 'down',
+      openai: 'down'
     }
+  };
 
-    const user = await loadUserById(decoded.id);
-    if (!user) return res.status(401).json({ error: 'Usuário inválido' });
-
-    req.user = user;
-    next();
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    health.checks.database = 'connected';
   } catch (error) {
-    console.error('[Auth Error]', error.message);
-    // Retornamos 401 para que o frontend saiba que deve deslogar o usuário
-    return res.status(401).json({ error: 'Token inválido ou expirado' });
+    health.success = false;
+    health.status = 'error';
+    health.checks.database = 'error';
   }
-};
 
-const registerSchema = z.object({
-  name: z.string().min(2),
-  email: z.string().email(),
-  password: z.string().min(6),
-  monthlyIncome: z.number().nonnegative().optional().default(0)
+  try {
+    if (openai) {
+      // Teste leve de conectividade
+      await openai.models.list();
+      health.checks.openai = 'connected';
+    } else {
+      health.checks.openai = 'not_configured';
+    }
+  } catch (error) {
+    health.checks.openai = 'error';
+  }
+
+  const statusCode = health.success ? 200 : 503;
+  res.status(statusCode).json(health);
 });
 
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(6)
-});
+// 🚀 API VERSIONING (v1)
+const v1Router = express.Router();
+
+// Modular Routes
+v1Router.use('/finance', financeRoutes);
+v1Router.use('/admin', adminRoutes);
+v1Router.use('/growth', growthRoutes);
+v1Router.use('/auth', authRoutes);
+
+// Main Routes in server.js
+app.use('/api/v1', v1Router);
+
+
 
 const transactionSchema = z.object({
   type: z.enum(['income', 'expense']),
@@ -170,13 +187,7 @@ const onboardingSchema = z.object({
   })
 });
 
-const parseRequest = (schema, data) => {
-  try {
-    return { success: true, data: schema.parse(data) };
-  } catch (error) {
-    return { success: false, errors: error.errors.map((err) => err.message) };
-  }
-};
+
 
 function startOfDay(date) {
   const d = new Date(date);
@@ -189,77 +200,41 @@ function dayDifference(dateA, dateB) {
   return Math.round(diff / (1000 * 60 * 60 * 24));
 }
 
-app.post('/api/auth/register', authLimiter, async (req, res) => {
-  const payload = {
-    ...req.body,
-    monthlyIncome: Number(req.body.monthlyIncome || 0)
-  };
-  const result = parseRequest(registerSchema, payload);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
 
+
+v1Router.delete('/user/me', authenticateToken, async (req, res, next) => {
   try {
-    const hashedPassword = await bcrypt.hash(result.data.password, 10);
-    const environment = await prisma.environment.create({
-      data: { name: `Ambiente de ${result.data.name}` }
+    const userId = req.user.id;
+    console.log(`⚠️ DELEÇÃO DE CONTA: Usuário ${userId} solicitou exclusão permanente.`);
+    await prisma.user.delete({
+      where: { id: userId }
     });
-
-    const user = await prisma.user.create({
-      data: {
-        name: result.data.name,
-        email: result.data.email,
-        password: hashedPassword,
-        monthlyIncome: result.data.monthlyIncome,
-        environmentId: environment.id
-      }
-    });
-    const secret = process.env.JWT_SECRET || 'test_secret_for_development';
-    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, secret);
-    const { password, ...safeUser } = user;
-    res.json({ user: safeUser, token });
+    res.json({ success: true, message: 'Sua conta e todos os seus dados foram excluídos permanentemente.' });
   } catch (error) {
-    res.status(400).json({ error: 'Erro ao registrar usuário' });
+    next(error);
   }
 });
 
-app.post('/api/auth/login', authLimiter, async (req, res) => {
-  const payload = { ...req.body };
-  const result = parseRequest(loginSchema, payload);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
-
-  try {
-    const user = await prisma.user.findUnique({ where: { email: result.data.email } });
-    if (!user || !(await bcrypt.compare(result.data.password, user.password))) {
-      return res.status(401).json({ error: 'Credenciais inválidas' });
-    }
-    const secret = process.env.JWT_SECRET || 'test_secret_for_development';
-    const token = jwt.sign({ id: user.id, environmentId: user.environmentId }, secret);
-    const { password, ...safeUser } = user;
-    res.json({ user: safeUser, token });
-  } catch (error) {
-    res.status(400).json({ error: 'Erro ao fazer login' });
-  }
-});
-
-app.get('/api/transactions', authenticateToken, async (req, res) => {
+v1Router.get('/transactions', authenticateToken, async (req, res, next) => {
   try {
     const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
     res.json(transactions);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar transações' });
+    next(error);
   }
 });
 
-app.post('/api/transactions', authenticateToken, async (req, res) => {
-  const payload = {
-    ...req.body,
-    amount: Number(req.body.amount),
-    date: req.body.date || new Date().toISOString(),
-    confirmWarning: req.body.confirmWarning === true
-  };
-  const result = parseRequest(transactionSchema, payload);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
-
+v1Router.post('/transactions', authenticateToken, async (req, res, next) => {
   try {
+    const payload = {
+      ...req.body,
+      amount: Number(req.body.amount),
+      date: req.body.date || new Date().toISOString(),
+      confirmWarning: req.body.confirmWarning === true
+    };
+    const result = parseRequest(transactionSchema, payload);
+    if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
+
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     const monthStart = new Date();
     monthStart.setDate(1);
@@ -281,14 +256,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
     const categoryShareOfExpenses = totalMonthExpenses > 0 ? projectedCategoryTotal / (totalMonthExpenses + result.data.amount) : 0;
     const warningThreshold = result.data.type === 'expense' && (categoryShareOfIncome > 0.18 || categoryShareOfExpenses > 0.55);
 
-    const alternatives = [
-      `Reduzir ${result.data.category} em 10% nas próximas semanas`,
-      'Adiar compras não essenciais para o próximo mês',
-      `Aumentar a economia mensal em R$ ${Math.max(50, Math.round(result.data.amount * 0.5))}`
-    ];
-
     if (warningThreshold && !result.data.confirmWarning) {
-      // Track warning shown
       await trackEvent(req.user.id, 'transaction_warning_shown', result.data.category, {
         amount: result.data.amount,
         projectedCategoryTotal,
@@ -300,10 +268,11 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
         message: `⚠️ Atenção: você já está gastando cerca de ${Math.round(categoryShareOfIncome * 100)}% da sua renda neste(a) ${result.data.category} este mês.`,
         category: result.data.category,
         projectedCategoryTotal: Number(projectedCategoryTotal.toFixed(2)),
-        currentCategoryTotal: Number(categoryExpenses.toFixed(2)),
-        alternatives
+        currentCategoryTotal: Number(categoryExpenses.toFixed(2))
       });
     }
+
+    const xpReward = 10;
 
     const transaction = await prisma.transaction.create({
       data: {
@@ -316,58 +285,58 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
       }
     });
 
-    // Track transaction creation
     if (result.data.confirmWarning) {
       await trackEvent(req.user.id, 'transaction_confirmed_anyway', result.data.category, {
         amount: result.data.amount
       });
     }
 
-    const impactMessage = result.data.type === 'expense'
-      ? categoryShareOfIncome > 0.18
-        ? `+R$ ${result.data.amount.toFixed(2)} registrado — 🔴 Meta impactada, ritmo acelerando.`
-        : `+R$ ${result.data.amount.toFixed(2)} registrado — 🟢 Ainda dentro do controle.`
-      : `+R$ ${result.data.amount.toFixed(2)} registrado como receita.`;
-
-    // Gamification Hook
-    const xpReward = result.data.type === 'income' ? 5 : 2;
     const gamification = await addXP(req.user.id, xpReward, result.data.type === 'income' ? 'Nova receita registrada' : 'Gasto registrado com sucesso');
 
-    res.json({ transaction, impactMessage, gamification });
+    // Telemetria: Transação
+    await trackTelemetry(req.user.id, 'transaction_created', { 
+      type: result.data.type, 
+      category: result.data.category, 
+      amount: result.data.amount 
+    });
+
+    // Ativação: Primeira Transação
+    const txCount = await prisma.transaction.count({ where: { userId: req.user.id } });
+    if (txCount === 1) {
+      await trackTelemetry(req.user.id, 'first_transaction_created');
+    }
+
+    res.json({ transaction, gamification });
   } catch (error) {
-    res.status(400).json({ error: 'Erro ao criar transação' });
+    next(error);
   }
 });
 
-app.delete('/api/transactions/:id', authenticateToken, async (req, res) => {
+v1Router.delete('/transactions/:id', authenticateToken, async (req, res, next) => {
   try {
     await prisma.transaction.delete({
-      where: {
-        id: req.params.id,
-        userId: req.user.id
-      }
+      where: { id: req.params.id, userId: req.user.id }
     });
     res.json({ success: true });
   } catch (error) {
-    res.status(400).json({ error: 'Erro ao excluir transação' });
+    next(error);
   }
 });
 
-app.get('/api/goals', authenticateToken, async (req, res) => {
+v1Router.get('/goals', authenticateToken, async (req, res, next) => {
   try {
     const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
     res.json(goals);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar metas' });
+    next(error);
   }
 });
 
-app.post('/api/goals', authenticateToken, async (req, res) => {
-  const payload = { ...req.body };
-  const result = parseRequest(goalSchema, payload);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
-
+v1Router.post('/goals', authenticateToken, async (req, res, next) => {
   try {
+    const result = parseRequest(goalSchema, req.body);
+    if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
+
     const goal = await prisma.goal.create({
       data: {
         userId: req.user.id,
@@ -379,21 +348,18 @@ app.post('/api/goals', authenticateToken, async (req, res) => {
       }
     });
 
-    // Gamification Hook
     await addXP(req.user.id, 20, `Novo objetivo planejado: ${goal.title}`);
-
     res.json(goal);
   } catch (error) {
-    res.status(400).json({ error: 'Erro ao criar meta' });
+    next(error);
   }
 });
 
-app.put('/api/goals/:id', authenticateToken, async (req, res) => {
-  const payload = { ...req.body };
-  const result = parseRequest(goalSchema, payload);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
-
+v1Router.put('/goals/:id', authenticateToken, async (req, res, next) => {
   try {
+    const result = parseRequest(goalSchema, req.body);
+    if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
+
     const goal = await prisma.goal.update({
       where: { id: req.params.id, ...tenantWhere(req.user) },
       data: {
@@ -406,13 +372,13 @@ app.put('/api/goals/:id', authenticateToken, async (req, res) => {
     });
     res.json(goal);
   } catch (error) {
-    res.status(400).json({ error: 'Erro ao atualizar meta' });
+    next(error);
   }
 });
 
 // /api/finance/summary and /api/finance/chart have been moved to decoupled financeRoutes.js
 
-app.get('/api/insights', authenticateToken, async (req, res) => {
+v1Router.get('/insights', authenticateToken, usageLimiter('insights'), lightCache(60), async (req, res, next) => {
   try {
     const insights = await prisma.insight.findMany({
       where: { ...tenantWhere(req.user) },
@@ -420,11 +386,11 @@ app.get('/api/insights', authenticateToken, async (req, res) => {
     });
     res.json(insights);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar insights' });
+    next(error);
   }
 });
 
-app.post('/api/insights/generate', authenticateToken, insightsLimiter, async (req, res) => {
+v1Router.post('/insights/generate', authenticateToken, usageLimiter('insights_generate'), insightsLimiter, async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user.id }, include: { userProfile: true } });
     const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
@@ -432,10 +398,6 @@ app.post('/api/insights/generate', authenticateToken, insightsLimiter, async (re
     const summary = calculateSummary(user, transactions, goals);
     const profile = user.userProfile || summary.userProfile || { spendingPattern: 'controlado', riskTolerance: 'médio' };
 
-    const topGoalStatus = summary.goalProjections[0]?.status || 'none';
-    const goalMessage = summary.goalProjections.filter((g) => !g.onTrack).length > 0 ? 'behind' : 'on_track';
-
-    // Get behavioral metrics
     const behaviorMetrics = await getEmotionalAnalyticsSummary(req.user.id);
 
     const tone = summary.riskLevel === 'ALTO'
@@ -444,48 +406,18 @@ app.post('/api/insights/generate', authenticateToken, insightsLimiter, async (re
         ? 'motivador e positivo'
         : 'prático e encorajador';
 
-    const prompt = `Você é um coach financeiro pessoal e motivador. Sempre use linguagem simples e positiva.
-
-CONTEXTO DO USUÁRIO:
-- Situação atual: ${summary.riskLevel}
-- Economia mensal: ${Math.round(summary.savingsRate * 100)}%
-- Maior gasto: ${summary.topSpendingCategory} (${Math.round(summary.topSpendingPercentage)}% da renda)
-- Tendência: ${summary.trendDirection.toUpperCase()} ${Math.round(Math.abs(summary.trend) * 100)}%
-- Meta financeira: ${goalMessage}
-- Saldo atual: R$ ${summary.balance}
-- Previsão de gastos: R$ ${summary.predictedExpenses}
-- Perfil: ${profile.spendingPattern}
-- Hábitos: ${behaviorMetrics.emotional.consistencyMessage.replace('🔥 ', '')}
-- Controle: ${behaviorMetrics.emotional.preventionMessage.replace('🧠 ', '')}
-- Reflexão: ${behaviorMetrics.emotional.engagementMessage.replace('🔍 ', '')}
-- Tom da mensagem: ${tone}
-
-SUA MISSÃO:
-Traduza esses dados em uma mensagem clara e motivadora que ajude o usuário a melhorar.
-
-REGRAS IMPORTANTES:
-- Máximo 3 frases curtas
-- Use linguagem simples e conversacional
-- Destaque progresso positivo quando houver
-- Evite termos técnicos financeiros
-- Foque em ação prática e motivação
-- Termine com uma chamada para ação positiva
-
-EXEMPLOS DE BOAS RESPOSTAS:
-"Você está controlando quase metade dos gastos impulsivos — continue assim!"
-"Seu check-in diário está criando hábitos fortes — mantenha o ritmo."
-"Você refletiu antes de gastar essa semana — sinal de maturidade financeira."
-
-AGORA, CRIE UMA MENSAGEM PERSONALIZADA:`;
+    const prompt = `Você é um coach financeiro pessoal e motivador. Traduza os dados em uma mensagem curta (máx 3 frases) e motivadora.
+DADOS: Risco ${summary.riskLevel}, Economia ${Math.round(summary.savingsRate * 100)}%, Top Categoria ${summary.topSpendingCategory}, Saldo R$ ${summary.balance}.
+Tom: ${tone}.`;
 
     if (!openai) {
-      return res.status(503).json({ error: 'Serviço de IA temporariamente indisponível' });
+      return res.status(503).json({ error: 'Serviço de IA indisponível' });
     }
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 400
+      max_tokens: 200
     });
 
     const message = completion.choices[0].message.content;
@@ -493,17 +425,26 @@ AGORA, CRIE UMA MENSAGEM PERSONALIZADA:`;
       data: {
         userId: req.user.id,
         message,
-        type: summary.riskLevel === 'ALTO' ? 'warning' : summary.percentageMonthUsed > 70 ? 'warning' : 'suggestion'
+        type: summary.riskLevel === 'ALTO' ? 'warning' : 'suggestion'
       }
     });
 
+    // Telemetria: Insight Gerado
+    await trackTelemetry(req.user.id, 'insight_generated', { type: insight.type });
+
+    // Ativação: Primeiro Insight
+    const insightCount = await prisma.insight.count({ where: { userId: req.user.id } });
+    if (insightCount === 1) {
+      await trackTelemetry(req.user.id, 'first_insight_generated');
+    }
+
     res.json(insight);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao gerar insight' });
+    next(error);
   }
 });
 
-app.get('/api/score', authenticateToken, async (req, res) => {
+v1Router.get('/score', authenticateToken, async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
@@ -511,43 +452,37 @@ app.get('/api/score', authenticateToken, async (req, res) => {
     const summary = calculateSummary(user, transactions, goals);
     res.json({ score: summary.score, savingsRate: summary.savingsRate, riskLevel: summary.riskLevel });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao calcular score' });
+    next(error);
   }
 });
 
-app.get('/api/users/profile', authenticateToken, async (req, res) => {
+v1Router.get('/users/profile', authenticateToken, async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
       include: { userProfile: true }
     });
-    const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
-    const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
-    const summary = calculateSummary(user, transactions, goals);
     const profile = user.userProfile || {};
     res.json({
       id: user.id,
       email: user.email,
       name: user.name,
-      spendingPattern: profile.spendingPattern || summary.userProfile.spendingPattern,
-      riskTolerance: profile.riskTolerance || summary.userProfile.riskTolerance,
-      lastUpdated: profile.lastUpdated || summary.userProfile.lastUpdated,
+      spendingPattern: profile.spendingPattern,
+      riskTolerance: profile.riskTolerance,
       streakDays: user.streakDays,
-      lastCheckIn: user.lastCheckIn,
-      onboardingCompleted: user.onboardingCompleted,
       xp: user.xp,
       level: user.level
     });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar perfil do usuário' });
+    next(error);
   }
 });
 
-app.put('/api/users/profile', authenticateToken, async (req, res) => {
-  const result = parseRequest(profileSchema, req.body);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
-
+v1Router.put('/users/profile', authenticateToken, async (req, res, next) => {
   try {
+    const result = parseRequest(profileSchema, req.body);
+    if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
+
     const profile = await prisma.userProfile.upsert({
       where: { ...tenantWhere(req.user) },
       create: {
@@ -564,68 +499,50 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
     });
     res.json(profile);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao atualizar perfil do usuário' });
+    next(error);
   }
 });
 
-app.post('/api/onboarding', authenticateToken, async (req, res) => {
-  const result = parseRequest(onboardingSchema, req.body);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
-
+v1Router.post('/onboarding', authenticateToken, async (req, res, next) => {
   try {
-    const { monthlyIncome, goal } = result.data;
+    const result = parseRequest(onboardingSchema, req.body);
+    if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
 
-    // 1. Update User
     await prisma.user.update({
       where: { id: req.user.id },
       data: {
-        monthlyIncome,
+        monthlyIncome: result.data.monthlyIncome,
         onboardingCompleted: true,
-        xp: { increment: 50 } // Onboarding bonus
+        xp: { increment: 50 }
       }
     });
 
-    // 2. Create Initial Goal
     const newGoal = await prisma.goal.create({
       data: {
         userId: req.user.id,
-        title: goal.title,
-        targetAmount: goal.targetAmount,
-        deadline: new Date(goal.deadline),
-        type: 'travel' // Default type for onboarding
-      }
-    });
-
-    // 3. Create Welcome Notification
-    await prisma.notification.create({
-      data: {
-        userId: req.user.id,
-        title: '💎 Bem-vindo ao FinMind!',
-        message: 'Seu perfil foi configurado. Já calculamos suas primeiras metas e o Coach está de olho!',
-        type: 'achievement',
-        priority: 'high'
+        ...result.data.goal,
+        type: 'travel'
       }
     });
 
     res.json({ success: true, goal: newGoal });
   } catch (error) {
-    console.error('[Onboarding Error]:', error);
-    res.status(500).json({ error: 'Erro ao completar onboarding' });
+    next(error);
   }
 });
 
-app.post('/api/checkin', authenticateToken, async (req, res) => {
+v1Router.post('/checkin', authenticateToken, async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     const now = new Date();
     let streakDays = 1;
 
-    if (user.lastCheckIn) {
-      const diff = dayDifference(now, new Date(user.lastCheckIn));
-      if (diff === 0) {
-        return res.status(400).json({ error: 'Check-in já realizado hoje' });
-      }
-      streakDays = diff === 1 ? user.streakDays + 1 : 1;
+    if (user.lastCheckIn && dayDifference(now, new Date(user.lastCheckIn)) === 0) {
+      return res.status(400).json({ error: 'Check-in já realizado hoje' });
+    }
+
+    if (user.lastCheckIn && dayDifference(now, new Date(user.lastCheckIn)) === 1) {
+      streakDays = user.streakDays + 1;
     }
 
     const updatedUser = await prisma.user.update({
@@ -633,89 +550,45 @@ app.post('/api/checkin', authenticateToken, async (req, res) => {
       data: { streakDays, lastCheckIn: now }
     });
 
-    // Track daily checkin
     await trackEvent(req.user.id, 'daily_checkin');
-
-    if (streakDays > 0 && streakDays % 7 === 0) {
-      const behaviorSummary = await getEmotionalAnalyticsSummary(req.user.id);
-      const preventionMessage = behaviorSummary.emotional.preventionMessage;
-      await prisma.notification.create({
-        data: {
-          userId: req.user.id,
-          title: '🔥 Conquista de Hábitos!',
-          message: `${preventionMessage.replace('🧠 ', '')} — continue assim e transforme isso em rotina.`,
-          type: 'achievement'
-        }
-      });
-    }
-
-    // Gamification Hook
     const gamification = await addXP(req.user.id, 5, `Check-in diário! Streak de ${streakDays} dias.`);
 
     res.json({ 
       streakDays: updatedUser.streakDays, 
-      lastCheckIn: updatedUser.lastCheckIn,
       gamification 
     });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao registrar check-in diário' });
+    next(error);
   }
 });
 
-app.post('/api/finance/simulate', authenticateToken, async (req, res) => {
-  const payload = { ...req.body };
-  const result = parseRequest(simulationSchema, payload);
-  if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
-
+v1Router.post('/finance/simulate', authenticateToken, async (req, res, next) => {
   try {
+    const result = parseRequest(simulationSchema, req.body);
+    if (!result.success) return res.status(400).json({ error: result.errors.join(', ') });
+
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     const transactions = await prisma.transaction.findMany({ where: { ...tenantWhere(req.user) } });
     const goals = await prisma.goal.findMany({ where: { ...tenantWhere(req.user) } });
     const summary = calculateSummary(user, transactions, goals);
 
-    // Track simulation usage
-    await trackEvent(req.user.id, 'simulation_used');
-
     const adjustedIncome = Math.max(0, user.monthlyIncome + (result.data.incomeAdjustment || 0));
-    const adjustedExpenses = Math.max(0, summary.monthlyExpenses + (result.data.expenseAdjustment || 0) - (result.data.extraMonthlySavings || 0));
-    const simulatedSavingsRate = adjustedIncome > 0 ? Number(((adjustedIncome - adjustedExpenses) / adjustedIncome).toFixed(2)) : 0;
-    const simulatedRiskLevel = simulatedSavingsRate < 0 ? 'ALTO' : simulatedSavingsRate < 0.2 ? 'MÉDIO' : 'BAIXO';
-
-    const baseSimulation = {
-      monthlyIncome: Number(adjustedIncome.toFixed(2)),
-      monthlyExpenses: Number(adjustedExpenses.toFixed(2)),
-      savingsRate: simulatedSavingsRate,
-      riskLevel: simulatedRiskLevel,
-      projectedMonthlySavings: Number(Math.max(0, adjustedIncome - adjustedExpenses).toFixed(2)),
-      predictedExpenses: Number((summary.predictedExpenses + (result.data.expenseAdjustment || 0)).toFixed(2))
-    };
-
-    let goalSimulation = null;
-    const goalToSimulate = result.data.goalId ? goals.find((goal) => goal.id === result.data.goalId) : goals[0];
-    if (goalToSimulate) {
-      const remaining = Math.max(0, goalToSimulate.targetAmount - goalToSimulate.currentAmount);
-      const monthsToGoal = baseSimulation.projectedMonthlySavings > 0
-        ? Number((remaining / baseSimulation.projectedMonthlySavings).toFixed(1))
-        : null;
-      goalSimulation = {
-        goalId: goalToSimulate.id,
-        title: goalToSimulate.title,
-        monthsToGoal,
-        recommendedMonthlySaving: Number((remaining / Math.max(1, monthsToGoal || 1)).toFixed(2))
-      };
-    }
+    const adjustedExpenses = Math.max(0, summary.monthlyExpenses + (result.data.expenseAdjustment || 0));
+    const simulatedSavingsRate = adjustedIncome > 0 ? (adjustedIncome - adjustedExpenses) / adjustedIncome : 0;
 
     res.json({
-      scenario: result.data,
-      simulation: baseSimulation,
-      goalSimulation
+      simulation: {
+        monthlyIncome: adjustedIncome,
+        monthlyExpenses: adjustedExpenses,
+        savingsRate: simulatedSavingsRate
+      }
     });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao gerar simulação financeira' });
+    next(error);
   }
 });
 
-app.get('/api/notifications', authenticateToken, async (req, res) => {
+v1Router.get('/notifications', authenticateToken, async (req, res, next) => {
   try {
     const notifications = await prisma.notification.findMany({
       where: { ...tenantWhere(req.user) },
@@ -724,19 +597,16 @@ app.get('/api/notifications', authenticateToken, async (req, res) => {
     });
     res.json(notifications);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar notificações' });
+    next(error);
   }
 });
 
-app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
+v1Router.put('/notifications/:id/read', authenticateToken, async (req, res, next) => {
   try {
-    const result = await prisma.notification.updateMany({
+    await prisma.notification.updateMany({
       where: { id: req.params.id, ...tenantWhere(req.user) },
       data: { read: true }
     });
-    if (result.count === 0) {
-      return res.status(404).json({ error: 'Notificação não encontrada' });
-    }
 
     const notification = await prisma.notification.findFirst({
       where: { id: req.params.id, ...tenantWhere(req.user) }
@@ -744,177 +614,100 @@ app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
 
     res.json(notification);
   } catch (error) {
-    console.error('[Notification Update Error]', error.message);
-    res.status(400).json({ error: 'Erro ao marcar notificação como lida' });
+    next(error);
   }
 });
 
-app.get('/api/patterns', authenticateToken, async (req, res) => {
+v1Router.get('/analytics/emotional', authenticateToken, usageLimiter('emotional_analytics'), lightCache(60), async (req, res, next) => {
   try {
-    const patterns = await prisma.patternAlert.findMany({
-      where: { ...tenantWhere(req.user) },
-      orderBy: { detectedAt: 'desc' }
-    });
-    res.json(patterns);
+    const summary = await getEmotionalAnalyticsSummary(req.user.id);
+    res.json(summary);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar padrões' });
+    next(error);
   }
 });
 
-app.post('/api/daily-analysis-trigger', authenticateToken, async (req, res) => {
+v1Router.post('/analytics/track', authenticateToken, async (req, res, next) => {
+  try {
+    await trackTelemetry(req.user.id, req.body.type, { 
+        category: req.body.category, 
+        ...req.body.data 
+    });
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+v1Router.get('/analytics/growth-actions', authenticateToken, async (req, res, next) => {
+  try {
+    const actions = await prisma.growthAction.findMany({
+      where: { userId: req.user.id, status: 'pending' },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json({ actions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+v1Router.put('/analytics/growth-actions/:id', authenticateToken, async (req, res, next) => {
+  try {
+    const { status } = req.body;
+    const action = await prisma.growthAction.updateMany({
+      where: { id: req.params.id, userId: req.user.id },
+      data: { status }
+    });
+    res.json({ success: true, action });
+  } catch (error) {
+    next(error);
+  }
+});
+
+v1Router.post('/analytics/track-public', async (req, res, next) => {
+  try {
+    const { type, metadata } = req.body;
+    await trackTelemetry(null, type, metadata);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+v1Router.delete('/user/reset', authenticateToken, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.goal.deleteMany({ where: { userId } });
+    await prisma.insight.deleteMany({ where: { userId } });
+    await prisma.notification.deleteMany({ where: { userId } });
+    await prisma.user.update({
+      where: { id: userId },
+      data: { xp: 0, level: 1, streakDays: 0, lastCheckIn: null }
+    });
+    res.json({ message: 'Seus dados foram resetados com sucesso.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 🚀 Manual Job Trigger (Render safe)
+v1Router.post('/jobs/run-daily', async (req, res, next) => {
   if (process.env.ADMIN_TOKEN !== req.header('x-admin-token')) {
     return res.status(403).json({ error: 'Acesso negado' });
   }
-  
   try {
     await runDailyAnalysis();
-    res.json({ message: 'Análise diária executada com sucesso' });
+    res.json({ success: true, message: 'Análise diária executada com sucesso' });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao executar análise diária' });
+    next(error);
   }
 });
 
-app.get('/api/analytics/emotional', authenticateToken, async (req, res) => {
-  try {
-    const summary = await getEmotionalAnalyticsSummary(req.user.id);
-    res.json(summary);
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar análise comportamental' });
-  }
-});
+// 🚨 Global Error Handler (SaaS Safety Net)
+app.use(errorHandler);
 
-// Analytics routes
-app.post('/api/analytics/track', authenticateToken, async (req, res) => {
-  const { type, category, data } = req.body;
-  if (!type) return res.status(400).json({ error: 'Tipo de evento obrigatório' });
-
-  try {
-    await trackEvent(req.user.id, type, category, data);
-
-    // Gamification for intelligent behavior
-    if (type === 'transaction_warning_cancelled') {
-        await addXP(req.user.id, 15, 'Decisão consciente: você evitou um gasto impulsivo após o alerta!');
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao registrar evento' });
-  }
-});
-
-app.post('/api/transactions/cancel', authenticateToken, async (req, res) => {
-  const { category, amount, reason } = req.body;
-  
-  try {
-    // Track cancellation after warning
-    await trackEvent(req.user.id, 'transaction_cancelled_after_warning', category, {
-      amount,
-      reason
-    });
-    
-    res.json({ success: true, message: 'Transação cancelada com sucesso' });
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao cancelar transação' });
-  }
-});
-
-app.post('/api/transactions/alternative', authenticateToken, async (req, res) => {
-  const { category, alternativeType } = req.body;
-  
-  try {
-    // Track alternative selection
-    await trackEvent(req.user.id, 'alternative_selected', category, {
-      alternativeType
-    });
-    
-    res.json({ success: true, message: 'Alternativa registrada' });
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao registrar alternativa' });
-  }
-});
-
-app.get('/api/analytics/summary', authenticateToken, async (req, res) => {
-  try {
-    const summary = await getEmotionalAnalyticsSummary(req.user.id);
-    res.json(summary);
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar resumo analítico' });
-  }
-});
-
-app.get('/api/analytics/weekly-summary', authenticateToken, async (req, res) => {
-  try {
-    const summary = await getEmotionalAnalyticsSummary(req.user.id);
-    const weeklySummary = summary.emotional.weeklySummary;
-    res.json(weeklySummary);
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao gerar resumo semanal' });
-  }
-});
-
-app.get('/api/analytics/badges', authenticateToken, async (req, res) => {
-  try {
-    const summary = await getEmotionalAnalyticsSummary(req.user.id);
-    const badges = summary.emotional.badges;
-    res.json(badges);
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar badges' });
-  }
-});
-
-app.get('/api/analytics/timeline', authenticateToken, async (req, res) => {
-  try {
-    const days = parseInt(req.query.days) || 30;
-    const timeline = await getPersonalTimeline(req.user.id, days);
-    res.json(timeline);
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao gerar timeline pessoal' });
-  }
-});
-
-app.delete('/api/user/reset', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    console.log(`🧹 Iniciando reset de dados solicitado pelo usuário: ${userId}`);
-
-    // Ordem para respeitar FKs
-    await prisma.notification.deleteMany({ where: { userId } });
-    await prisma.insight.deleteMany({ where: { userId } });
-    await prisma.transaction.deleteMany({ where: { userId } });
-    await prisma.goal.deleteMany({ where: { userId } });
-    await prisma.dailySnapshot.deleteMany({ where: { userId } });
-    await prisma.patternAlert.deleteMany({ where: { userId } });
-    await prisma.behaviorEvent.deleteMany({ where: { userId } });
-    await prisma.userProfile.deleteMany({ where: { userId } });
-
-    // Reset XP and level in User table
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
-        xp: 0,
-        level: 1,
-        streakDays: 0,
-        lastCheckIn: null
-      }
-    });
-
-    res.json({ message: 'Seus dados foram resetados com sucesso.' });
-  } catch (error) {
-    console.error('[User Reset Error]:', error);
-    res.status(500).json({ error: 'Erro ao resetar seus dados. Tente novamente mais tarde.' });
-  }
-});
-
-// 🚀 Global Error Handler (SaaS Safety Net)
-app.use((err, req, res, next) => {
-  console.error(`[Global Error]: ${err.stack}`);
-  res.status(err.status || 500).json({
-    error: 'Erro interno no servidor',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Algo deu errado. Tente novamente mais tarde.'
-  });
-});
-
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001;
 
 // 🚨 Error Handlers (Production Safety)
 process.on('uncaughtException', (err) => {
@@ -944,6 +737,23 @@ async function startServer() {
       console.log('--------------------------------------------------');
       startDailyAnalysisJob();
       startNotificationScheduler();
+      
+      // 🚀 GROWTH ENGINE SCHEDULER (Batch Process)
+      console.log('[GROWTH] Agendando motor de automação (Shadow Mode)...');
+      cron.schedule('0 */4 * * *', async () => { 
+        try {
+          const { runGrowthEngine } = require('./services/growthEngineService');
+          await runGrowthEngine();
+        } catch (err) {
+          console.error('[GROWTH ERROR] Falha na execução agendada:', err);
+        }
+      });
+      
+      // Execução inicial após 1 minuto (shadow validation)
+      setTimeout(() => {
+        const { runGrowthEngine } = require('./services/growthEngineService');
+        runGrowthEngine().catch(console.error);
+      }, 60000);
     });
   } catch (error) {
     console.error('❌ ERRO CRÍTICO NO STARTUP:');

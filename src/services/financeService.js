@@ -4,20 +4,22 @@ const { calculateProjections, calculateFinancialSummary, detectRisk } = require(
 // prisma instance imported above
 
 async function getDetailedChartData(userId) {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
     const user = await prisma.user.findUnique({
         where: { id: userId },
-        include: { transactions: true }
+        select: { id: true, monthlyIncome: true }
     });
 
     if (!user) throw new Error("Usuário não encontrado");
 
-    const now = new Date();
-    const currentMonth = now.getMonth();
-    const currentYear = now.getFullYear();
-
-    const monthlyTransactions = user.transactions.filter(t => {
-        const d = new Date(t.date);
-        return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+    const monthlyTransactions = await prisma.transaction.findMany({
+        where: {
+            userId: userId,
+            date: { gte: startOfMonth, lte: endOfMonth }
+        }
     });
 
     // 1. Organize Daily Data
@@ -31,16 +33,14 @@ async function getDetailedChartData(userId) {
         else dailyDataMap[dayStr].expenses += t.amount;
     });
 
-    const dailyData = Object.keys(dailyDataMap)
-        .sort((a, b) => parseInt(a) - parseInt(b))
-        .map(key => dailyDataMap[key]);
+    const dailyData = Object.values(dailyDataMap).sort((a, b) => parseInt(a.date) - parseInt(b.date));
 
     // 2. Engine Calculations for Projections
     const engineProjections = calculateProjections(monthlyTransactions, user.monthlyIncome);
     
     // 3. Mount Predicted Data Array (Visual future projection)
     const predictedData = [];
-    const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+    const daysInMonth = endOfMonth.getDate();
     const currentDay = now.getDate();
 
     for (let i = currentDay + 1; i <= daysInMonth; i++) {
@@ -65,13 +65,28 @@ async function getDetailedChartData(userId) {
 async function getGeneralSummary(userId) {
     const user = await prisma.user.findUnique({
         where: { id: userId },
-        include: { transactions: true }
+        select: { id: true, monthlyIncome: true }
     });
 
     if (!user) throw new Error("Usuário não encontrado");
 
-    const summary = calculateFinancialSummary(user.transactions, user.monthlyIncome);
-    return summary;
+    // Para o resumo geral, ainda precisamos de todas as transações se quisermos o saldo total
+    // Mas podemos filtrar por tipos ou usar agregação se o volume for muito alto.
+    // Por enquanto, vamos manter transactions mas sem o include gigante.
+    const transactions = await prisma.transaction.findMany({
+        where: { userId: userId }
+    });
+
+    const summary = calculateFinancialSummary(transactions, user.monthlyIncome);
+    
+    return {
+        totalBalance: summary.totalBalance,
+        totalIncome: summary.totalIncome,
+        totalExpenses: summary.totalExpenses,
+        savingsRate: summary.savingsRate,
+        trend: summary.trend,
+        trendDirection: summary.trendDirection
+    };
 }
 
 module.exports = {

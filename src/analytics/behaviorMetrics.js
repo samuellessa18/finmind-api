@@ -4,12 +4,12 @@ const prisma = require('../../prisma/client');
 // Track behavior events
 async function trackEvent(userId, type, category = null, data = null) {
   try {
-    await prisma.behaviorEvent.create({
+    await prisma.event.create({
       data: {
         userId,
         type,
         category,
-        data
+        metadata: data ? JSON.stringify(data) : null
       }
     });
   } catch (error) {
@@ -20,7 +20,7 @@ async function trackEvent(userId, type, category = null, data = null) {
 // Calculate behavioral metrics
 async function calculateMetrics(userId) {
   try {
-    const events = await prisma.behaviorEvent.findMany({
+    const events = await prisma.event.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' }
     });
@@ -239,8 +239,22 @@ async function getEmotionalAnalyticsSummary(userId) {
   const previousMetrics = null; // TODO: implement historical comparison
 
   const improvement = calculateImprovement(metrics, previousMetrics);
-  const weeklySummary = generateWeeklySummary(metrics, improvement);
+  
+  // Regra de Ativação: (transações >= 3) OU (eventos de atividade >= 3)
+  const hasEnoughData = summary.user.totalTransactions >= 3 || metrics.totalEvents >= 3;
+  const weeklySummary = hasEnoughData ? generateWeeklySummary(metrics, improvement) : null;
+  
   const badges = generateBadges(metrics, summary.user);
+
+  // Buscar uso de IA do dia atual
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const aiUsage = await prisma.aIUsage.findUnique({
+    where: { userId_date: { userId, date: today } }
+  });
+
+  const limits = { free: 3, pro: 50 };
+  const userPlan = summary.user.plan || 'free';
 
   return {
     ...summary,
@@ -249,7 +263,11 @@ async function getEmotionalAnalyticsSummary(userId) {
       engagementMessage: translateSmartEngagement(metrics.smartEngagementRate),
       consistencyMessage: translateConsistency(metrics.averageStreak),
       weeklySummary,
-      badges
+      badges,
+      aiUsage: {
+        current: aiUsage?.count || 0,
+        limit: limits[userPlan] || 3
+      }
     }
   };
 }
