@@ -146,9 +146,6 @@ v1Router.use('/admin', adminRoutes);
 v1Router.use('/growth', growthRoutes);
 v1Router.use('/auth', authRoutes);
 
-// Main Routes in server.js
-app.use('/api/v1', v1Router);
-
 
 const registerSchema = z.object({
   name: z.string().min(2),
@@ -721,6 +718,10 @@ v1Router.post('/jobs/run-daily', async (req, res, next) => {
     next(error);
   }
 });
+
+// 🚀 MOUNT API ROUTES (v1)
+// We mount here at the end to ensure all routes on v1Router are registered
+app.use('/api/v1', v1Router);
 
 // 🚨 Global Error Handler (SaaS Safety Net)
 app.use(errorHandler);
