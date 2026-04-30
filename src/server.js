@@ -144,7 +144,7 @@ const v1Router = express.Router();
 v1Router.use('/finance', financeRoutes);
 v1Router.use('/admin', adminRoutes);
 v1Router.use('/growth', growthRoutes);
-v1Router.use('/auth', authRoutes);
+// Removido daqui para montagem direta no app abaixo
 
 
 const registerSchema = z.object({
@@ -720,8 +720,29 @@ v1Router.post('/jobs/run-daily', async (req, res, next) => {
 });
 
 // 🚀 MOUNT API ROUTES (v1)
-// We mount here at the end to ensure all routes on v1Router are registered
+// Montagem direta da Auth para evitar problemas de aninhamento
+app.use('/api/v1/auth', authRoutes);
+
+// Demais rotas via v1Router
 app.use('/api/v1', v1Router);
+
+// Debug: Listar rotas registradas (Render Logs)
+console.log('--- 🛣️  ROTAS REGISTRADAS ---');
+const listRoutes = (path, stack) => {
+  stack.forEach(layer => {
+    if (layer.route) {
+      console.log(`[ROUTE] ${Object.keys(layer.route.methods).join(',').toUpperCase()} ${path}${layer.route.path}`);
+    } else if (layer.name === 'router') {
+      listRoutes(`${path}${layer.regexp.source.replace('\\/?(?=\\/|$)', '').replace('^\\', '')}`, layer.handle.stack);
+    }
+  });
+};
+try {
+  listRoutes('', app._router.stack);
+} catch (e) {
+  console.log('Não foi possível listar as rotas automaticamente.');
+}
+console.log('---------------------------');
 
 // 🚨 Global Error Handler (SaaS Safety Net)
 app.use(errorHandler);
