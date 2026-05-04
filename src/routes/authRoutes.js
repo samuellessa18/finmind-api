@@ -117,14 +117,10 @@ router.post('/auth/login', async (req, res, next) => {
  */
 router.get('/auth/google', async (req, res) => {
   console.log("🔥 /auth/google chamada");
-  // Teste simplificado solicitado pelo usuário
-  res.send('Google route funcionando');
-  
-  /* Logica real comentada para teste de rota
   await trackTelemetry(null, 'auth_started', { provider: 'google', type: 'oauth' });
   const rootUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
   const options = {
-    redirect_uri: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:3001/api/v1/auth/google/callback',
+    redirect_uri: process.env.GOOGLE_CALLBACK_URL || 'https://finmind-api-y31d.onrender.com/api/v1/auth/google/callback',
     client_id: process.env.GOOGLE_CLIENT_ID_WEB,
     access_type: 'offline',
     response_type: 'code',
@@ -137,7 +133,6 @@ router.get('/auth/google', async (req, res) => {
 
   const qs = new URLSearchParams(options);
   res.redirect(`${rootUrl}?${qs.toString()}`);
-  */
 });
 
 /**
