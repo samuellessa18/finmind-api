@@ -3,7 +3,7 @@ services:
     name: finmind-api
     env: node
     plan: free
-    buildCommand: npm install && node prisma-nuclear-fix.js && npx prisma generate && npx prisma db push
+    buildCommand: npm install && node prisma-nuclear-fix.js && npx prisma generate && npx prisma db push --accept-data-loss
     startCommand: node src/server.js
     healthCheckPath: /api/health
     envVars:
