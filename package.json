@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "build": "npx prisma generate && npx prisma db push"
+    "build": "node prisma-nuclear-fix.js && npx prisma generate && npx prisma db push"
   },
   "dependencies": {
     "@prisma/client": "^5.7.0",
