@@ -46,13 +46,13 @@ const isOpenAIConfigured = Boolean(openaiApiKey);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10, // Ajustado ligeiramente
+  max: 100, // Aumentado para troubleshoot
   message: { error: 'Muitas tentativas de autenticação, tente novamente em 15 minutos.' }
 });
 
 const insightsLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 5,
+  max: 100, // Aumentado para troubleshoot
   message: { error: 'Muitas solicitações de insights, aguarde um minuto.' }
 });
 
