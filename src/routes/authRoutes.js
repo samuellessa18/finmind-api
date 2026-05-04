@@ -117,6 +117,7 @@ router.post('/auth/login', async (req, res, next) => {
  */
 router.get('/auth/google', async (req, res) => {
   console.log("🔥 /auth/google chamada");
+  console.log("🔑 GOOGLE_CLIENT_ID_WEB:", process.env.GOOGLE_CLIENT_ID_WEB);
   await trackTelemetry(null, 'auth_started', { provider: 'google', type: 'oauth' });
   const rootUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
   const options = {
