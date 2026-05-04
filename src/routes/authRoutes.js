@@ -162,7 +162,7 @@ router.get('/auth/google/callback', async (req, res, next) => {
       data: {
         code: tempCode,
         userId: user.id,
-        expiresAt: new Date(Date.now() + 60000)
+        expiresAt: new Date(Date.now() + 300000) // 5 minutos de validade
       }
     });
 
@@ -190,8 +190,15 @@ router.post('/auth/google/exchange', async (req, res, next) => {
       where: { code }
     });
 
-    if (!authRecord || authRecord.expiresAt < new Date()) {
-      return res.status(401).json({ error: 'Código inválido ou expirado' });
+    console.log("🔍 Verificando código no banco:", code);
+    if (!authRecord) {
+      console.log("❌ Código não encontrado no banco de dados.");
+      return res.status(401).json({ error: 'Código inválido ou não encontrado' });
+    }
+
+    if (authRecord.expiresAt < new Date()) {
+      console.log("❌ Código expirou em:", authRecord.expiresAt);
+      return res.status(401).json({ error: 'Código expirado' });
     }
 
     const user = await prisma.user.findUnique({ where: { id: authRecord.userId } });
