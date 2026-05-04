@@ -36,7 +36,8 @@ const parseRequest = (schema, data) => {
 /**
  * POST /api/v1/auth/register
  */
-router.post('/register', async (req, res, next) => {
+router.post('/auth/register', async (req, res, next) => {
+  console.log("🔥 /auth/register chamada");
   try {
     const payload = {
       ...req.body,
@@ -80,7 +81,8 @@ router.post('/register', async (req, res, next) => {
 /**
  * POST /api/v1/auth/login
  */
-router.post('/login', async (req, res, next) => {
+router.post('/auth/login', async (req, res, next) => {
+  console.log("🔥 /auth/login chamada");
   try {
     const payload = { ...req.body };
     await trackTelemetry(null, 'auth_started', { provider: 'local', type: 'login' });
@@ -113,7 +115,12 @@ router.post('/login', async (req, res, next) => {
 /**
  * GET /api/v1/auth/google
  */
-router.get('/google', async (req, res) => {
+router.get('/auth/google', async (req, res) => {
+  console.log("🔥 /auth/google chamada");
+  // Teste simplificado solicitado pelo usuário
+  res.send('Google route funcionando');
+  
+  /* Logica real comentada para teste de rota
   await trackTelemetry(null, 'auth_started', { provider: 'google', type: 'oauth' });
   const rootUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
   const options = {
@@ -130,12 +137,14 @@ router.get('/google', async (req, res) => {
 
   const qs = new URLSearchParams(options);
   res.redirect(`${rootUrl}?${qs.toString()}`);
+  */
 });
 
 /**
  * GET /api/v1/auth/google/callback
  */
-router.get('/google/callback', async (req, res, next) => {
+router.get('/auth/google/callback', async (req, res, next) => {
+  console.log("🔥 /auth/google/callback chamada");
   const code = req.query.code;
   if (!code) return res.status(400).json({ error: 'Código de autorização não fornecido' });
 
@@ -175,7 +184,8 @@ router.get('/google/callback', async (req, res, next) => {
 /**
  * POST /api/v1/auth/google/exchange
  */
-router.post('/google/exchange', async (req, res, next) => {
+router.post('/auth/google/exchange', async (req, res, next) => {
+  console.log("🔥 /auth/google/exchange chamada");
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Código requerido' });
 
@@ -208,7 +218,8 @@ router.post('/google/exchange', async (req, res, next) => {
 /**
  * POST /api/v1/auth/google/mobile
  */
-router.post('/google/mobile', async (req, res, next) => {
+router.post('/auth/google/mobile', async (req, res, next) => {
+  console.log("🔥 /auth/google/mobile chamada");
   const { idToken } = req.body;
   if (!idToken) return res.status(400).json({ error: 'idToken requerido' });
 

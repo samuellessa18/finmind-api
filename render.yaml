@@ -3,7 +3,7 @@ services:
     name: finmind-api
     env: node
     plan: free
-    buildCommand: npx prisma generate && npx prisma migrate resolve --rolled-back 20260430205500_init || true && npx prisma migrate deploy
+    buildCommand: npm install && npx prisma generate && npx prisma db push
     startCommand: node src/server.js
     healthCheckPath: /api/health
     envVars:

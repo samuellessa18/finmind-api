@@ -720,29 +720,35 @@ v1Router.post('/jobs/run-daily', async (req, res, next) => {
 });
 
 // 🚀 MOUNT API ROUTES (v1)
-// Montagem direta da Auth para evitar problemas de aninhamento
-app.use('/api/v1/auth', authRoutes);
+// Montagem direta da Auth para garantir o prefixo /api/v1/auth
+app.use('/api/v1', authRoutes);
+console.log("📌 Auth routes mounted at /api/v1/auth");
 
 // Demais rotas via v1Router
 app.use('/api/v1', v1Router);
 
 // Debug: Listar rotas registradas (Render Logs)
-console.log('--- 🛣️  ROTAS REGISTRADAS ---');
+console.log('--- 🛣️  ROTAS REGISTRADAS NO BOOT ---');
 const listRoutes = (path, stack) => {
   stack.forEach(layer => {
     if (layer.route) {
-      console.log(`[ROUTE] ${Object.keys(layer.route.methods).join(',').toUpperCase()} ${path}${layer.route.path}`);
+      const methods = Object.keys(layer.route.methods).join(',').toUpperCase();
+      console.log(`[ROUTE] ${methods} ${path}${layer.route.path}`);
     } else if (layer.name === 'router') {
-      listRoutes(`${path}${layer.regexp.source.replace('\\/?(?=\\/|$)', '').replace('^\\', '')}`, layer.handle.stack);
+      const newPath = path + layer.regexp.source
+        .replace('\\/?(?=\\/|$)', '')
+        .replace('^\\', '')
+        .replace('\\/', '/');
+      listRoutes(newPath, layer.handle.stack);
     }
   });
 };
 try {
   listRoutes('', app._router.stack);
 } catch (e) {
-  console.log('Não foi possível listar as rotas automaticamente.');
+  console.log('Não foi possível listar as rotas automaticamente:', e.message);
 }
-console.log('---------------------------');
+console.log('-----------------------------------');
 
 // 🚨 Global Error Handler (SaaS Safety Net)
 app.use(errorHandler);

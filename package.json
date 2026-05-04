@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "build": "npx prisma generate && npx prisma db push"
   },
   "dependencies": {
     "@prisma/client": "^5.7.0",
@@ -19,6 +20,7 @@
     "jsonwebtoken": "^9.0.2",
     "node-cron": "^3.0.2",
     "openai": "^4.20.1",
+    "pg": "^8.20.0",
     "prisma": "^5.7.0",
     "zod": "^3.23.2"
   },
