@@ -168,12 +168,12 @@ router.get('/auth/google/callback', async (req, res, next) => {
 
     await trackTelemetry(user.id, user.provider === 'google' ? 'google_signup_success' : 'google_login_success');
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://finan-as-pessoais-seven.vercel.app';
     res.redirect(`${frontendUrl}/auth/callback?code=${tempCode}`);
   } catch (error) {
     console.error('[GOOGLE_CALLBACK] Erro:', error.response?.data || error.message);
     await trackTelemetry(null, 'auth_failed', { provider: 'google', type: 'oauth', reason: 'callback_error' });
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=auth_failed`);
+    res.redirect(`${process.env.FRONTEND_URL || 'https://finan-as-pessoais-seven.vercel.app'}/login?error=auth_failed`);
   }
 });
 
