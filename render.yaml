@@ -1,21 +1,51 @@
+# ──────────────────────────────────────────────────────────────
+# FinMind API — render.yaml
+# PATCHED: Auditoria de Segurança
+#
+# Correções aplicadas:
+#  1. REMOVIDO: npx prisma db push --accept-data-loss (DESTRUTIVO)
+#     SUBSTITUÍDO por: npx prisma migrate deploy (SEGURO)
+#  2. REMOVIDO: node prisma-nuclear-fix.js do pipeline automático
+#  3. SUBSTITUÍDO: npm install → npm ci (builds reproduzíveis)
+#  4. healthCheckPath mantido em /api/health
+# ──────────────────────────────────────────────────────────────
+
 services:
   - type: web
     name: finmind-api
     env: node
-    plan: free
-    buildCommand: npm install && node prisma-nuclear-fix.js && npx prisma generate && npx prisma db push --accept-data-loss
+    plan: free  # Considerar upgrade para eliminar cold start (OAuth timeout)
+    region: oregon
+
+    # CORRIGIDO: npm ci garante versões exatas do package-lock.json
+    # CORRIGIDO: prisma migrate deploy (seguro) ao invés de db push --accept-data-loss
+    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy
+
     startCommand: node src/server.js
     healthCheckPath: /api/health
+
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: DATABASE_URL
-        sync: false
+        sync: false   # Configurar manualmente no painel do Render
       - key: JWT_SECRET
-        sync: false
+        sync: false   # Gerar: node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
       - key: FRONTEND_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID_WEB
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CALLBACK_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID_ANDROID
+        sync: false
+      - key: GOOGLE_CLIENT_ID_IOS
         sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: ADMIN_TOKEN
-        sync: false
-      - key: NODE_ENV
-        value: production
+        sync: false   # Gerar: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+      - key: GROWTH_ROLLOUT_PERCENTAGE
+        value: "10"

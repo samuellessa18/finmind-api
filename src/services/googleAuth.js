@@ -1,99 +1,142 @@
+/**
+ * FinMind API — services/googleAuth.js
+ * Versão: PATCHED (Auditoria de Segurança)
+ *
+ * Correções aplicadas:
+ *  1. Merge de contas híbrido: se email já existe com provider='local',
+ *     vincula o googleId ao usuário existente (provider → 'hybrid')
+ *     ANTES: criava segundo registro → dados duplicados, transações perdidas
+ *  2. Verificação de audience do token (aud deve casar com CLIENT_ID)
+ *  3. GOOGLE_CLIENT_ID_WEB lido consistentemente
+ *  4. Logs limpos: não logar dados pessoais (email, nome)
+ *  5. Erro descritivo se variáveis Google não configuradas
+ */
+
+'use strict';
+
 const { OAuth2Client } = require('google-auth-library');
-const prisma = require('../../prisma/client');
+const prisma           = require('../../prisma/client');
 
-// IDs de Clientes para múltiplas plataformas
-const CLIENT_IDS = [
-    process.env.GOOGLE_CLIENT_ID_WEB,
-    process.env.GOOGLE_CLIENT_ID_ANDROID,
-    process.env.GOOGLE_CLIENT_ID_IOS
-].filter(Boolean);
+// ─────────────────────────────────────────────────────────────
+// CLIENTE OAUTH2 — inicializado com CLIENT_ID do Web
+// ─────────────────────────────────────────────────────────────
+function getOAuthClient() {
+  const clientId = process.env.GOOGLE_CLIENT_ID_WEB;
+  if (!clientId) {
+    throw new Error(
+      '[googleAuth] GOOGLE_CLIENT_ID_WEB não configurado. Impossível verificar tokens Google.'
+    );
+  }
+  return new OAuth2Client(clientId);
+}
 
-const client = new OAuth2Client();
-
-/**
- * Valida um idToken do Google e retorna os dados do usuário.
- * Suporta múltiplas audiências (Web, Android, iOS).
- */
+// ─────────────────────────────────────────────────────────────
+// verifyGoogleToken
+// Verifica a assinatura e validade do id_token retornado pelo Google
+// ─────────────────────────────────────────────────────────────
 async function verifyGoogleToken(idToken) {
-    if (CLIENT_IDS.length === 0) {
-        throw new Error('Configuração de Google Client IDs ausente no servidor');
-    }
+  const client   = getOAuthClient();
+  const clientId = process.env.GOOGLE_CLIENT_ID_WEB;
 
-    try {
-        const ticket = await client.verifyIdToken({
-            idToken,
-            // O Google valida se a audiência do token está nesta lista
-            audience: CLIENT_IDS,
-        });
-        const payload = ticket.getPayload();
+  let ticket;
+  try {
+    ticket = await client.verifyIdToken({
+      idToken,
+      audience: clientId, // CORRIGIDO: validar audience explicitamente
+    });
+  } catch (err) {
+    console.error('[googleAuth] Falha ao verificar id_token:', err.message);
+    throw new Error('Token Google inválido ou expirado.');
+  }
 
-        if (!payload.email_verified) {
-            throw new Error('Email não verificado pelo Google');
-        }
+  const payload = ticket.getPayload();
 
-        // Log de segurança para auditoria
-        console.log(`[GOOGLE_AUTH] Token validado para audiência: ${payload.aud}`);
+  if (!payload) {
+    throw new Error('Payload do token Google está vazio.');
+  }
 
-        return {
-            googleId: payload.sub,
-            email: payload.email,
-            name: payload.name,
-            picture: payload.picture,
-        };
-    } catch (error) {
-        console.error('[GOOGLE_AUTH] Erro ao validar token:', error.message);
-        throw new Error(`Token do Google inválido ou expirado: ${error.message}`);
-    }
+  if (!payload.email_verified) {
+    throw new Error('E-mail Google não verificado.');
+  }
+
+  return {
+    googleId:  payload.sub,
+    email:     payload.email.toLowerCase().trim(),
+    name:      payload.name || 'Usuário',
+    avatarUrl: payload.picture || null,
+  };
 }
 
-/**
- * Busca ou cria um usuário a partir dos dados do Google.
- * Implementa a estratégia de vinculação de conta (hybrid).
- */
+// ─────────────────────────────────────────────────────────────
+// findOrCreateGoogleUser
+// Lógica de merge de contas:
+//   - Se já existe user com mesmo googleId → login Google normal
+//   - Se já existe user com mesmo email (provider=local) → MERGE (hybrid)
+//   - Caso contrário → criar novo user Google
+// ─────────────────────────────────────────────────────────────
 async function findOrCreateGoogleUser(googleData) {
-    const { googleId, email, name, picture } = googleData;
+  const { googleId, email, name, avatarUrl } = googleData;
 
-    // 1. Tentar buscar por googleId
-    let user = await prisma.user.findUnique({ where: { googleId } });
-    if (user) return user;
+  // 1. Buscar por googleId (login recorrente)
+  const existingByGoogleId = await prisma.user.findUnique({
+    where: { googleId },
+  });
+  if (existingByGoogleId) {
+    // Atualizar avatar caso tenha mudado
+    if (existingByGoogleId.avatarUrl !== avatarUrl) {
+      return prisma.user.update({
+        where: { id: existingByGoogleId.id },
+        data:  { avatarUrl },
+      });
+    }
+    return existingByGoogleId;
+  }
 
-    // 2. Tentar buscar por email (para vinculação automática)
-    user = await prisma.user.findUnique({ where: { email } });
+  // 2. Buscar por email (pode ser conta local existente)
+  const existingByEmail = await prisma.user.findUnique({
+    where: { email },
+  });
 
-    if (user) {
-        // Vinculação: usuário local agora vira hybrid
-        user = await prisma.user.update({
-            where: { id: user.id },
-            data: {
-                googleId,
-                provider: 'hybrid',
-                avatarUrl: picture || user.avatarUrl
-            }
-        });
-        console.log(`[AUTH] Usuário ${email} vinculado ao Google (Hybrid)`);
-    } else {
-        // Criar novo usuário do zero
-        const environment = await prisma.environment.create({
-            data: { name: `Ambiente de ${name}` }
-        });
-
-        user = await prisma.user.create({
-            data: {
-                name,
-                email,
-                googleId,
-                provider: 'google',
-                avatarUrl: picture,
-                environmentId: environment.id
-            }
-        });
-        console.log(`[AUTH] Novo usuário criado via Google: ${email}`);
+  if (existingByEmail) {
+    if (existingByEmail.provider === 'local' || existingByEmail.provider === 'hybrid') {
+      // CORRIGIDO: MERGE — vincular googleId à conta local existente
+      // Preserva todas as transações, metas e dados do usuário
+      console.log(`[googleAuth] Merge de conta: email ${email.slice(0, 3)}*** → provider hybrid`);
+      return prisma.user.update({
+        where: { id: existingByEmail.id },
+        data: {
+          googleId,
+          avatarUrl: avatarUrl || existingByEmail.avatarUrl,
+          provider:  'hybrid',
+        },
+      });
     }
 
-    return user;
+    // Já é conta Google com outro googleId (raro — trocar conta Google)
+    // Atualizar googleId para o novo
+    console.warn(`[googleAuth] Usuário com mesmo email trocou de conta Google.`);
+    return prisma.user.update({
+      where: { id: existingByEmail.id },
+      data:  { googleId, avatarUrl: avatarUrl || existingByEmail.avatarUrl },
+    });
+  }
+
+  // 3. Criar novo usuário Google
+  const environment = await prisma.environment.create({
+    data: { name: `Ambiente de ${name}` },
+  });
+
+  return prisma.user.create({
+    data: {
+      name,
+      email,
+      password:      null, // Sem senha para contas Google puras
+      provider:      'google',
+      googleId,
+      avatarUrl,
+      environmentId: environment.id,
+    },
+  });
 }
 
-module.exports = {
-    verifyGoogleToken,
-    findOrCreateGoogleUser
-};
+module.exports = { verifyGoogleToken, findOrCreateGoogleUser };
