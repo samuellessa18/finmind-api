@@ -19,7 +19,7 @@ services:
 
     # CORRIGIDO: npm ci garante versões exatas do package-lock.json
     # CORRIGIDO: prisma migrate deploy (seguro) ao invés de db push --accept-data-loss
-    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy
+    buildCommand: npm ci && npx prisma generate && npx prisma migrate deploy
 
     startCommand: node src/server.js
     healthCheckPath: /api/health
