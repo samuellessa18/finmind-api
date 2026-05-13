@@ -104,15 +104,18 @@ const { trackTelemetry }                      = require('./services/telemetrySer
 const { verifyGoogleToken, findOrCreateGoogleUser } = require('./services/googleAuth');
 const { runGrowthEngine }                     = require('./services/growthEngineService');
 
-const financeRoutes    = require('./routes/financeRoutes');
-const adminRoutes      = require('./routes/adminRoutes');
-const growthRoutes     = require('./routes/growthRoutes');
-const authRoutes       = require('./routes/authRoutes');
-const usageLimiter     = require('./middleware/usageLimiter');
-const requestLogger    = require('./middleware/requestLogger');
-const errorHandler     = require('./middleware/errorHandler');
-const lightCache       = require('./middleware/cache');
+const financeRoutes       = require('./routes/financeRoutes');
+const adminRoutes         = require('./routes/adminRoutes');
+const growthRoutes        = require('./routes/growthRoutes');
+const authRoutes          = require('./routes/authRoutes');
+const openFinanceRoutes   = require('./routes/openFinanceRoutes');
+const pluggyWebhookRoutes = require('./routes/pluggyWebhookRoutes');
+const usageLimiter        = require('./middleware/usageLimiter');
+const requestLogger       = require('./middleware/requestLogger');
+const errorHandler        = require('./middleware/errorHandler');
+const lightCache          = require('./middleware/cache');
 const { authenticateToken } = require('./middleware/auth');
+const { checkConsentExpiry } = require('./services/openFinanceService');
 
 // ─────────────────────────────────────────────────────────────
 // 3. INICIALIZAÇÃO DO APP
@@ -180,6 +183,10 @@ const corsOptions = {
 
 app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
+
+// Webhook Pluggy MUST be mounted before express.json() — uses express.raw internally
+app.use('/api/v1', pluggyWebhookRoutes);
+
 app.use(express.json({ limit: '1mb' })); // Limite de payload
 app.use(cookieParser()); // [CRÍTICO-1] Habilita req.cookies — necessário para CSRF state do OAuth Google
 
@@ -362,17 +369,52 @@ function dayDifference(dateA, dateB) {
 // ─────────────────────────────────────────────────────────────
 const v1Router = express.Router();
 
-v1Router.use('/finance', financeRoutes);
-v1Router.use('/admin',   adminRoutes);
-v1Router.use('/growth',  growthRoutes);
+v1Router.use('/finance',       financeRoutes);
+v1Router.use('/admin',         adminRoutes);
+v1Router.use('/growth',        growthRoutes);
+v1Router.use('/open-finance',  openFinanceRoutes);
 
 // --- User ---
 v1Router.delete('/user/me', authenticateToken, async (req, res, next) => {
   try {
     const userId = req.user.id;
-    console.log(`⚠️ DELEÇÃO DE CONTA: Usuário ${userId}`);
+    // [LGPD Art. 18] Logar deleção sem PII do usuário no log público
+    console.log(`[LGPD] Solicitação de deleção de conta: ${userId.slice(0, 8)}...`);
     await prisma.user.delete({ where: { id: userId } });
     res.json({ success: true, message: 'Conta excluída permanentemente.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// [LGPD Art. 18] Portabilidade — exportação dos dados pessoais do usuário
+v1Router.get('/user/export', authenticateToken, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const [user, transactions, goals, insights, notifications] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true, name: true, email: true, monthlyIncome: true,
+          createdAt: true, plan: true, streakDays: true, xp: true, level: true,
+        },
+      }),
+      prisma.transaction.findMany({ where: { userId } }),
+      prisma.goal.findMany({ where: { userId } }),
+      prisma.insight.findMany({ where: { userId } }),
+      prisma.notification.findMany({ where: { userId }, take: 100 }),
+    ]);
+
+    res.setHeader('Content-Disposition', 'attachment; filename="finmind-meus-dados.json"');
+    res.setHeader('Content-Type', 'application/json');
+    res.json({
+      exportedAt: new Date().toISOString(),
+      user,
+      transactions,
+      goals,
+      insights,
+      notifications,
+    });
   } catch (error) {
     next(error);
   }
@@ -542,8 +584,8 @@ v1Router.put('/notifications/:id/read', authenticateToken, async (req, res, next
 v1Router.get(
   '/analytics/emotional',
   authenticateToken,
+  lightCache(60),     // Cache ANTES do usageLimiter para não incrementar hits cacheados
   usageLimiter('emotional_analytics'),
-  lightCache(60),
   async (req, res, next) => {
     try {
       const summary = await getEmotionalAnalyticsSummary(req.user.id);
@@ -553,6 +595,89 @@ v1Router.get(
     }
   }
 );
+
+// Alias que o mobile chama como /analytics/summary
+v1Router.get('/analytics/summary', authenticateToken, lightCache(60), async (req, res, next) => {
+  try {
+    const summary = await getEmotionalAnalyticsSummary(req.user.id);
+    res.json(summary);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// /analytics/weekly-summary — retorna o resumo semanal do objeto emotional
+v1Router.get('/analytics/weekly-summary', authenticateToken, lightCache(300), async (req, res, next) => {
+  try {
+    const summary = await getEmotionalAnalyticsSummary(req.user.id);
+    res.json(summary?.emotional?.weeklySummary || null);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// /analytics/badges — retorna badges do objeto emotional
+v1Router.get('/analytics/badges', authenticateToken, lightCache(300), async (req, res, next) => {
+  try {
+    const summary = await getEmotionalAnalyticsSummary(req.user.id);
+    res.json(summary?.emotional?.badges || []);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- User Profile (rota faltante chamada pelo mobile) ---
+v1Router.get('/users/profile', authenticateToken, lightCache(30), async (req, res, next) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        id: true, name: true, email: true, avatarUrl: true,
+        monthlyIncome: true, streakDays: true, xp: true, level: true,
+        isPremium: true, plan: true, onboardingCompleted: true,
+        lastCheckIn: true, createdAt: true, provider: true,
+      },
+    });
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    res.json(user);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- Check-in diário (rota faltante chamada pelo mobile) ---
+v1Router.post('/checkin', authenticateToken, async (req, res, next) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (user.lastCheckIn) {
+      const lastDay = new Date(user.lastCheckIn);
+      lastDay.setHours(0, 0, 0, 0);
+      if (lastDay.getTime() === today.getTime()) {
+        return res.status(400).json({ error: 'Você já fez check-in hoje.' });
+      }
+    }
+
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const isConsecutive = user.lastCheckIn && new Date(user.lastCheckIn) >= yesterday;
+    const newStreak = isConsecutive ? user.streakDays + 1 : 1;
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: { lastCheckIn: new Date(), streakDays: newStreak },
+      select: { streakDays: true },
+    });
+
+    res.json({ success: true, streakDays: updated.streakDays });
+  } catch (error) {
+    next(error);
+  }
+});
 
 v1Router.post('/analytics/track', authenticateToken, async (req, res, next) => {
   try {
@@ -692,6 +817,30 @@ async function startServer() {
       setTimeout(() => {
         runGrowthEngine().catch(console.error);
       }, 60_000);
+
+      // Open Finance: verificar consentimentos expirados diariamente às 2h
+      cron.schedule('0 2 * * *', async () => {
+        try {
+          const count = await checkConsentExpiry();
+          if (count > 0) console.log(`[OpenFinance] ${count} consentimentos marcados como expirados.`);
+        } catch (err) {
+          console.error('[OpenFinance] Erro no job de expiração:', err.message);
+        }
+      });
+
+      // [LGPD Art. 15] Retenção de dados: limpar Events e AuthCodes antigos semanalmente
+      cron.schedule('0 3 * * 0', async () => {
+        try {
+          const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+          const [deletedEvents, deletedCodes] = await Promise.all([
+            prisma.event.deleteMany({ where: { createdAt: { lt: ninetyDaysAgo } } }),
+            prisma.authCode.deleteMany({ where: { expiresAt: { lt: new Date() } } }),
+          ]);
+          console.log(`[LGPD Retention] Removidos: ${deletedEvents.count} events, ${deletedCodes.count} auth codes expirados.`);
+        } catch (err) {
+          console.error('[LGPD Retention] Erro na limpeza:', err.message);
+        }
+      });
     });
   } catch (error) {
     console.error('❌ ERRO CRÍTICO NO STARTUP:', error.message);

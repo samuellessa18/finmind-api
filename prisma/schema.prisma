@@ -217,5 +217,89 @@ model GrowthAction {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, status])  // Query de ações ativas por usuário
+  @@index([userId, status])
+}
+
+// ─── Open Finance (Pluggy) ───────────────────────────────────
+
+model BankConnection {
+  id                 String    @id @default(cuid())
+  userId             String
+  // pluggyItemId armazenado criptografado (AES-256-GCM) — nunca em plaintext
+  pluggyItemIdEnc    String    @unique
+  // HMAC-SHA256 determinístico para lookup eficiente (não é reversível)
+  pluggyItemIdHmac   String    @unique
+  institutionId      String
+  institutionName    String
+  institutionLogo    String?
+  // UPDATING | UPDATED | LOGIN_ERROR | OUTDATED | WAITING_USER_INPUT
+  status             String    @default("UPDATING")
+  errorCode          String?
+  errorMessage       String?
+  consentExpiresAt   DateTime?
+  lastSyncAt         DateTime?
+  lastSyncTxCount    Int       @default(0)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accounts BankAccount[]
+
+  @@index([userId])
+  @@index([userId, status])
+  @@index([consentExpiresAt])   // Para job de expiração de consentimento
+}
+
+model BankAccount {
+  id                   String    @id @default(cuid())
+  connectionId         String
+  userId               String
+  // pluggyAccountId criptografado
+  pluggyAccountIdEnc   String    @unique
+  // HMAC-SHA256 para lookup
+  pluggyAccountIdHmac  String    @unique
+  type                 String    // BANK | CREDIT
+  subtype             String?   // CHECKING | SAVINGS | CREDIT_CARD
+  name                String
+  number              String?   // últimos 4 dígitos apenas (não criptografar)
+  balance             Float     @default(0)
+  balanceDate         DateTime?
+  currencyCode        String    @default("BRL")
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  connection   BankConnection    @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions BankTransaction[]
+
+  @@index([connectionId])
+  @@index([userId])
+}
+
+model BankTransaction {
+  id               String    @id @default(cuid())
+  accountId        String
+  userId           String
+  // pluggyTxId não é PII — é apenas ID de referência do Pluggy
+  pluggyTxId       String    @unique
+  date             DateTime
+  description      String
+  amount           Float     // positivo = crédito, negativo = débito
+  currencyCode     String    @default("BRL")
+  type             String    // DEBIT | CREDIT
+  pluggyCategory   String?   // categoria original do Pluggy
+  finmindCategory  String?   // normalizada para categorias do FinMind
+  merchant         String?   // nome do estabelecimento (se disponível)
+  balance          Float?    // saldo após transação (se disponível)
+  // null = não importada; preenchida após o usuário importar para Transaction
+  importedTxId     String?
+  createdAt        DateTime  @default(now())
+
+  account BankAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, date])
+  @@index([userId, date])
+  @@index([userId, finmindCategory])
+  @@index([importedTxId])          // Para checar duplicatas
 }
