@@ -1,20 +1,38 @@
+'use strict';
+
 const express = require('express');
-const prisma = require('../../prisma/client');
+const crypto  = require('crypto');
+const prisma  = require('../../prisma/client');
 const { authenticateToken } = require('../middleware/auth');
 const { getProductInsights } = require('../services/productInsightsService');
-const { runGrowthEngine } = require('../services/growthEngineService');
+const { runGrowthEngine }    = require('../services/growthEngineService');
 
 const router = express.Router();
 
-// Middleware de proteção adicional para Admin
+// [ALTO-3] requireAdmin com comparação timing-safe (previne timing attack)
 const requireAdmin = (req, res, next) => {
-    const adminToken = process.env.ADMIN_TOKEN;
-    const providedToken = req.headers['x-admin-token'];
+  const adminToken    = process.env.ADMIN_TOKEN || '';
+  const providedToken = req.headers['x-admin-token'] || '';
 
-    if (!adminToken || providedToken !== adminToken) {
-        return res.status(403).json({ success: false, message: 'Acesso negado: Token admin inválido.' });
-    }
-    next();
+  if (!adminToken || !providedToken) {
+    return res.status(403).json({ success: false, message: 'Acesso negado.' });
+  }
+
+  // Padding para garantir buffers de mesmo tamanho antes da comparação
+  const maxLen = Math.max(adminToken.length, providedToken.length);
+  const bufA   = Buffer.from(adminToken.padEnd(maxLen));
+  const bufB   = Buffer.from(providedToken.padEnd(maxLen));
+
+  // timingSafeEqual + checagem de comprimento real (evita bypass via padding)
+  const isEqual = bufA.length === bufB.length
+    && crypto.timingSafeEqual(bufA, bufB)
+    && adminToken.length === providedToken.length;
+
+  if (!isEqual) {
+    console.warn('[SECURITY][ADMIN] Tentativa de acesso admin negada.');
+    return res.status(403).json({ success: false, message: 'Acesso negado.' });
+  }
+  next();
 };
 
 const calculateMedian = (values) => {

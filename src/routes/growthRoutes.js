@@ -29,14 +29,19 @@ router.get('/active', authenticateToken, async (req, res, next) => {
 
 /**
  * POST /api/v1/growth/action/:id/dismiss
- * Allows user to dismiss a banner/intervention.
+ * [CRÍTICO-4] IDOR corrigido: prisma.update ignora campos não-unique no where.
+ * Padrão seguro: verificar ownership com findFirst antes de atualizar.
  */
 router.post('/action/:id/dismiss', authenticateToken, async (req, res, next) => {
     try {
-        await prisma.growthAction.update({
+        // updateMany respeita todos os campos no where (incluindo userId)
+        const result = await prisma.growthAction.updateMany({
             where: { id: req.params.id, userId: req.user.id },
-            data: { status: 'dismissed' }
+            data:  { status: 'dismissed' },
         });
+        if (result.count === 0) {
+            return res.status(404).json({ error: 'Ação não encontrada.' });
+        }
         res.json({ success: true });
     } catch (error) {
         next(error);

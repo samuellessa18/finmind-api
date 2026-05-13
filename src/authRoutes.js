@@ -30,6 +30,9 @@ const { verifyGoogleToken, findOrCreateGoogleUser } = require('../services/googl
 
 const router = express.Router();
 
+// [CRÍTICO-5] Hash dummy pré-computado — veja routes/authRoutes.js para explicação completa
+const DUMMY_HASH = require('bcryptjs').hashSync('__finmind_timing_protection__', 12);
+
 // ─────────────────────────────────────────────────────────────
 // SCHEMAS ZOD
 // ─────────────────────────────────────────────────────────────
@@ -155,24 +158,27 @@ router.post('/auth/login', async (req, res, next) => {
 
     const user = await prisma.user.findUnique({ where: { email: result.data.email } });
 
-    // Timing-safe: sempre fazer bcrypt.compare mesmo se usuário não existir
-    // (previne user enumeration por timing)
-    const dummyHash = '$2b$12$invalidhashfortimingprotectiononly123456789012345678';
-    const passwordToCompare = user?.password || dummyHash;
-    const passwordMatch = await bcrypt.compare(result.data.password, passwordToCompare);
+    const passwordToCompare = user?.password || DUMMY_HASH;
+    const passwordMatch     = await bcrypt.compare(result.data.password, passwordToCompare);
 
-    if (!user || !passwordMatch) {
+    if (!user) {
       await trackTelemetry(null, 'auth_failed', {
         provider: 'local', type: 'login', reason: 'invalid_credentials',
       });
       return res.status(401).json({ error: 'Credenciais inválidas.' });
     }
 
-    // Usuário Google tentando login com senha
     if (user.provider === 'google' && !user.password) {
       return res.status(400).json({
         error: 'Esta conta foi criada com Google. Use o login com Google.',
       });
+    }
+
+    if (!passwordMatch) {
+      await trackTelemetry(user.id, 'auth_failed', {
+        provider: 'local', type: 'login', reason: 'invalid_credentials',
+      });
+      return res.status(401).json({ error: 'Credenciais inválidas.' });
     }
 
     const token = generateJWT(user);

@@ -42,6 +42,7 @@ model User {
   lastCheckIn         DateTime?
   createdAt           DateTime  @default(now())
   environmentId       String?
+  lgpdConsentAt       DateTime? // [MÉDIO-6] LGPD Art. 7, I — registro de consentimento
 
   environment    Environment?   @relation(fields: [environmentId], references: [id])
   transactions   Transaction[]

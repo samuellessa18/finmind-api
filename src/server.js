@@ -39,6 +39,12 @@ const PLACEHOLDER_PATTERNS = [
   'your-',
   '<',
   'CHANGEME',
+  // [CRÍTICO-2] Detectar secrets fracos conhecidos
+  'supersecret',
+  'admin_secret',
+  'password',
+  '12345',
+  'secret123',
 ];
 
 const envErrors = [];
@@ -72,6 +78,7 @@ if (envErrors.length > 0) {
 const express      = require('express');
 const cors         = require('cors');
 const helmet       = require('helmet');
+const cookieParser = require('cookie-parser'); // [CRÍTICO-1] Necessário para OAuth CSRF state
 const prisma       = require('../prisma/client');
 const jwt          = require('jsonwebtoken');
 const bcrypt       = require('bcryptjs');
@@ -146,6 +153,14 @@ const allowedOrigins = [
   // NÃO usar *.vercel.app — permite que qualquer deploy vercel acesse sua API
 ].filter(Boolean);
 
+// [CRÍTICO-2] Validar comprimento mínimo do JWT_SECRET (< 32 chars é inseguro)
+if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
+  console.error('╔══════════════════════════════════════════════════╗');
+  console.error('║  ERRO CRÍTICO: JWT_SECRET muito curto (< 32 chars) ║');
+  console.error('╚══════════════════════════════════════════════════╝');
+  process.exit(1);
+}
+
 const corsOptions = {
   origin: function (origin, callback) {
     // Sem origin: mobile nativo (Expo/React Native), Postman, cURL — permitir
@@ -166,6 +181,7 @@ const corsOptions = {
 app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' })); // Limite de payload
+app.use(cookieParser()); // [CRÍTICO-1] Habilita req.cookies — necessário para CSRF state do OAuth Google
 
 // ─────────────────────────────────────────────────────────────
 // 6. RATE LIMITING
@@ -187,18 +203,34 @@ const authLimiter = rateLimit({
 
 const insightsLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 20, // CORRIGIDO: era 100, reduzido para valor razoável
+  max: 5,
   message: {
     error: 'Muitas solicitações de insights. Aguarde um momento.',
     code:  'RATE_LIMIT_INSIGHTS',
   },
   standardHeaders: true,
   legacyHeaders:   false,
+  keyGenerator: (req) => req.user?.id || req.ip, // por usuário autenticado
 });
 
-// Aplicar rate limit específico nas rotas de auth
+// [ALTO-2] Rate limit para endpoint público de telemetria
+const publicTrackLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Muitas requisições. Aguarde.', code: 'RATE_LIMIT_PUBLIC' },
+  standardHeaders: true,
+  legacyHeaders:   false,
+  keyGenerator: (req) => req.ip,
+});
+
+// Aplicar rate limit nas rotas de auth
 app.use('/api/v1/auth/login',    authLimiter);
 app.use('/api/v1/auth/register', authLimiter);
+// [ALTO-1] Aplicar insightsLimiter nas rotas de geração de insight e analytics pesados
+app.use('/api/v1/insights',           insightsLimiter);
+app.use('/api/v1/analytics/emotional', insightsLimiter);
+// [ALTO-2] Rate limit no endpoint público de telemetria
+app.use('/api/v1/analytics/track-public', publicTrackLimiter);
 
 // ─────────────────────────────────────────────────────────────
 // 7. OPENAI — Fallback gracioso se não configurado
@@ -578,8 +610,16 @@ v1Router.post('/analytics/track-public', async (req, res, next) => {
 });
 
 // --- Jobs ---
-v1Router.post('/jobs/run-daily', async (req, res, next) => {
-  if (process.env.ADMIN_TOKEN !== req.header('x-admin-token')) {
+v1Router.post('/jobs/run-daily', authenticateToken, async (req, res, next) => {
+  // [ALTO-3] Timing-safe comparison + autenticação dupla (JWT + admin token)
+  const adminToken    = process.env.ADMIN_TOKEN || '';
+  const providedToken = req.header('x-admin-token') || '';
+  if (adminToken.length === 0 || providedToken.length === 0) {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
+  const tokenA = Buffer.from(adminToken.padEnd(64));
+  const tokenB = Buffer.from(providedToken.padEnd(64));
+  if (tokenA.length !== tokenB.length || !crypto.timingSafeEqual(tokenA, tokenB) || providedToken !== adminToken) {
     return res.status(403).json({ error: 'Acesso negado' });
   }
   try {

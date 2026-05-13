@@ -1,25 +1,39 @@
+'use strict';
+
+// [ALTO-4] LGPD — remover PII da telemetria antes de persistir
+// Art. 6 da LGPD: minimização de dados — não coletar mais do que o necessário.
+
 const prisma = require('../../prisma/client');
 
-/**
- * Registra eventos de telemetria estruturada para análise de produto
- * @param {string} userId - ID do usuário (opcional para eventos públicos)
- * @param {string} type - Tipo do evento (account_created, user_login, etc)
- * @param {object} metadata - Dados adicionais do evento
- */
-async function trackTelemetry(userId, type, metadata = {}) {
-    try {
-        await prisma.event.create({
-            data: {
-                userId,
-                type,
-                metadata: metadata ? JSON.stringify(metadata) : null
-            }
-        });
-    } catch (error) {
-        console.error(`[Telemetry Error] Failed to track ${type}:`, error.message);
+// Campos que NÃO devem ir para a tabela Event
+const PII_FIELDS = ['email', 'password', 'name', 'phone', 'cpf', 'ip'];
+
+function scrubPII(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const clean = { ...obj };
+  for (const field of PII_FIELDS) {
+    if (field in clean) {
+      delete clean[field];
     }
+  }
+  return clean;
 }
 
-module.exports = {
-    trackTelemetry
-};
+async function trackTelemetry(userId, type, metadata = {}) {
+  try {
+    const safeMetadata = scrubPII(metadata);
+    await prisma.event.create({
+      data: {
+        userId,
+        type,
+        metadata: safeMetadata && Object.keys(safeMetadata).length > 0
+          ? JSON.stringify(safeMetadata)
+          : null,
+      },
+    });
+  } catch (error) {
+    console.error(`[Telemetry Error] Failed to track ${type}:`, error.message);
+  }
+}
+
+module.exports = { trackTelemetry };
