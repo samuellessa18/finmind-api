@@ -6,11 +6,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "build": "npx prisma generate && npx prisma migrate deploy",
-"build:dev": "npx prisma generate && npx prisma migrate dev"
+    "build": "npx prisma generate && npx prisma migrate deploy"
   },
   "dependencies": {
-    "@prisma/client": "^5.7.0",
+    "@prisma/client": "^5.22.0",
     "axios": "^1.15.2",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
@@ -24,7 +23,8 @@
     "node-cron": "^3.0.2",
     "openai": "^4.20.1",
     "pg": "^8.20.0",
-    "prisma": "^5.7.0",
+    "prisma": "^5.22.0",
+    "uuid": "^11.1.0",
     "zod": "^3.23.2"
   },
   "devDependencies": {
