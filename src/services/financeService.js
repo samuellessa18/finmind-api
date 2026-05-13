@@ -70,11 +70,14 @@ async function getGeneralSummary(userId) {
 
     if (!user) throw new Error("Usuário não encontrado");
 
-    // Para o resumo geral, ainda precisamos de todas as transações se quisermos o saldo total
-    // Mas podemos filtrar por tipos ou usar agregação se o volume for muito alto.
-    // Por enquanto, vamos manter transactions mas sem o include gigante.
+    // [PERF] Limitar a 90 dias para evitar carregar toda a história em memória.
+    // Para o resumo financeiro atual, transações antigas têm impacto mínimo.
+    const ninetyDaysAgo = new Date();
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+
     const transactions = await prisma.transaction.findMany({
-        where: { userId: userId }
+        where: { userId, date: { gte: ninetyDaysAgo } },
+        orderBy: { date: 'desc' },
     });
 
     const summary = calculateFinancialSummary(transactions, user.monthlyIncome);

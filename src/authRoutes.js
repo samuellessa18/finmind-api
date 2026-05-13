@@ -122,6 +122,7 @@ router.post('/auth/register', async (req, res, next) => {
         monthlyIncome: result.data.monthlyIncome,
         environmentId: environment.id,
         provider:      'local',
+        lgpdConsentAt: new Date(),
       },
     });
 

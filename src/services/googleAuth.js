@@ -35,14 +35,26 @@ function getOAuthClient() {
 // Verifica a assinatura e validade do id_token retornado pelo Google
 // ─────────────────────────────────────────────────────────────
 async function verifyGoogleToken(idToken) {
-  const client   = getOAuthClient();
-  const clientId = process.env.GOOGLE_CLIENT_ID_WEB;
+  const client = getOAuthClient();
+
+  // [SEGURANÇA] Aceitar tokens de Web, Android E iOS.
+  // Tokens mobile têm `aud` = client ID do Android/iOS, não do Web.
+  // Verificar contra todos os client IDs configurados evita rejeições legítimas.
+  const validAudiences = [
+    process.env.GOOGLE_CLIENT_ID_WEB,
+    process.env.GOOGLE_CLIENT_ID_ANDROID,
+    process.env.GOOGLE_CLIENT_ID_IOS,
+  ].filter(Boolean);
+
+  if (validAudiences.length === 0) {
+    throw new Error('[googleAuth] Nenhum GOOGLE_CLIENT_ID configurado.');
+  }
 
   let ticket;
   try {
     ticket = await client.verifyIdToken({
       idToken,
-      audience: clientId, // CORRIGIDO: validar audience explicitamente
+      audience: validAudiences,
     });
   } catch (err) {
     console.error('[googleAuth] Falha ao verificar id_token:', err.message);

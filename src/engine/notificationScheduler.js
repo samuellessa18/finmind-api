@@ -102,10 +102,11 @@ async function runNotificationScheduler() {
       });
 
       const unreadCount = recentNotifications.filter(n => !n.read).length;
-      const isSilentMode = unreadCount >= 3; // Se tem 3+ notificações não lidas, entra em modo silêncio
+      const isSilentMode = unreadCount >= 3;
 
       if (isSilentMode) {
-        console.log(`[NotificationScheduler] Usuário ${user.email} em modo silêncio (${unreadCount} não lidas)`);
+        // [LGPD] Não logar email do usuário — usar ID parcial para rastreabilidade sem PII
+        console.log(`[NotificationScheduler] Usuário ${user.id.slice(0, 8)}... em modo silêncio (${unreadCount} não lidas)`);
         continue; // Pula notificações para este usuário
       }
 
@@ -140,7 +141,7 @@ async function runNotificationScheduler() {
 
       if (notifications.length > 0) {
         await prisma.notification.createMany({ data: notifications });
-        console.log(`[NotificationScheduler] ${notifications.length} notificações criadas para ${user.email}`);
+        console.log(`[NotificationScheduler] ${notifications.length} notificações criadas para ${user.id.slice(0, 8)}...`);
       }
     }
   } catch (error) {

@@ -288,13 +288,10 @@ async function getPersonalTimeline(userId, days = 30) {
       orderBy: { createdAt: 'asc' }
     });
 
-    // Get behavior events for key moments
-    const events = await prisma.behaviorEvent.findMany({
-      where: {
-        userId,
-        createdAt: { gte: startDate }
-      },
-      orderBy: { createdAt: 'desc' }
+    // [FIX] O modelo é Event, não behaviorEvent (behaviorEvent não existe no schema backend)
+    const events = await prisma.event.findMany({
+      where: { userId, createdAt: { gte: startDate } },
+      orderBy: { createdAt: 'desc' },
     });
 
     // Calculate key milestones

@@ -54,9 +54,13 @@ router.post('/action/:id/dismiss', authenticateToken, async (req, res, next) => 
  */
 router.post('/action/:id/track', authenticateToken, async (req, res, next) => {
     try {
-        const { event } = req.body; // 'displayed' | 'clicked'
-        const action = await prisma.growthAction.findUnique({
-            where: { id: req.params.id, userId: req.user.id }
+        const { event } = req.body;
+        if (!['displayed', 'clicked'].includes(event)) {
+            return res.status(400).json({ error: 'Evento inválido.' });
+        }
+        // [IDOR-FIX] findUnique ignora campos não-unique no where — usar findFirst
+        const action = await prisma.growthAction.findFirst({
+            where: { id: req.params.id, userId: req.user.id },
         });
 
         if (!action) return res.status(404).json({ error: 'Action not found' });
