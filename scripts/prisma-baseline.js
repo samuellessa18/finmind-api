@@ -13,25 +13,17 @@ function prisma(...args) {
   );
 }
 
-console.log('[prisma-baseline] Checking migration history...');
+// Always run resolve --applied. It is idempotent across all states:
+//   not applied → marks as applied
+//   failed      → fixes failed state and marks as applied  ← current situation
+//   already applied → exits with "already" message (we ignore it)
+console.log(`[prisma-baseline] Resolving "${MIGRATION}" as applied...`);
 
-// migrate status exits 1 when migrations are pending or _prisma_migrations
-// doesn't exist yet — spawnSync never throws, we just read stdout.
-const status = prisma('migrate', 'status');
-const out    = (status.stdout ?? '') + (status.stderr ?? '');
+const result = prisma('migrate', 'resolve', '--applied', MIGRATION);
+const out    = (result.stdout ?? '') + (result.stderr ?? '');
 
-if (out.includes(MIGRATION)) {
-  console.log('[prisma-baseline] Baseline already applied — skipping.');
-  process.exit(0);
-}
-
-console.log(`[prisma-baseline] Marking "${MIGRATION}" as applied...`);
-
-const resolve = prisma('migrate', 'resolve', '--applied', MIGRATION);
-const resolveOut = (resolve.stdout ?? '') + (resolve.stderr ?? '');
-
-if (resolve.status !== 0 && !resolveOut.includes('already')) {
-  console.error('[prisma-baseline] ERROR:', resolveOut);
+if (result.status !== 0 && !out.toLowerCase().includes('already')) {
+  console.error('[prisma-baseline] ERROR:', out);
   process.exit(1);
 }
 
