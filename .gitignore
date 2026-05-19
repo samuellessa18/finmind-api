@@ -1,6 +1,40 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Environment — NEVER commit these
 .env
+.env.local
+.env.*.local
+.env.development
+.env.production
+
+# Prisma local dev DB
 prisma/dev.db
+prisma/*.db-journal
+
+# Logs
 *.log
-dist
+npm-debug.log*
+logs/
+
+# Build artifacts
+dist/
+build/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Archives (avoid accidental commit of secrets in zip)
+*.zip
+*.tar.gz
+*.bak
+
+# Coverage
+coverage/
+.nyc_output/
