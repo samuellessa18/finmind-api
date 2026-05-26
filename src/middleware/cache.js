@@ -44,4 +44,21 @@ const lightCache = (ttl = 60) => {
   };
 };
 
+// [FIX F-1] Invalidação pontual de uma chave do cache.
+// Usar quando o estado do usuário muda fora do fluxo normal de GET
+// (ex: após /ads/unlock-ai invalidar o cache de /users/profile).
+// Operação O(1) no Map. Idempotente — Map.delete não lança se a
+// chave não existir e retorna apenas boolean.
+// Formato da chave: `${userId}:${originalUrl}`
+//
+// NOTA sobre race condition residual:
+//   Se uma requisição GET estiver in-flight (handler já passou pelo
+//   cache.get e fará cache.set ao retornar) NO MOMENTO em que
+//   invalidate() é chamado, ela pode reescrever a cache com dados
+//   "pré-mutação" após o delete. Janela típica: ~10-50ms.
+//   Tradeoff aceito: o bug original (TTL 30s garantido) é reduzido
+//   para uma race rara de dezenas de ms. Solução completa exigiria
+//   versioning do cache — fora de escopo (refactor amplo).
+lightCache.invalidate = (key) => cache.delete(key);
+
 module.exports = lightCache;

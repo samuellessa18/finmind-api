@@ -803,6 +803,12 @@ v1Router.post('/ads/unlock-ai', authenticateToken, adsUnlockLimiter, async (req,
       data:  { aiUnlockedUntil: aiExpiresAt },
     });
 
+    // [FIX F-1] Invalida o cache do profile para que a próxima chamada
+    // a /users/profile reflita imediatamente hasTemporaryAI=true.
+    // Sem isso, o lightCache(30) podia servir resposta pré-unlock por até 30s
+    // se o usuário fechasse e reabrisse o app logo após assistir o ad.
+    lightCache.invalidate(`${req.user.id}:/api/v1/users/profile`);
+
     await trackTelemetry(req.user.id, 'reward_ad_used', { source });
 
     return res.json({ ok: true, aiExpiresAt });
