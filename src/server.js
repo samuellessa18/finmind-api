@@ -626,6 +626,24 @@ v1Router.get('/analytics/badges', authenticateToken, lightCache(300), async (req
   }
 });
 
+// --- Personal Timeline (chamada pelo mobile em TimelineScreen) ---
+// Expõe getPersonalTimeline() — função determinística já existente.
+// Retorna array de eventos: { date, type, title, description, impact?, icon? }
+v1Router.get('/analytics/timeline', authenticateToken, async (req, res, next) => {
+  try {
+    // days: 1..365, default 30 — clamp defensivo contra valores fora do range.
+    const rawDays = Number(req.query.days);
+    const days = Number.isFinite(rawDays)
+      ? Math.min(365, Math.max(1, Math.trunc(rawDays)))
+      : 30;
+    const timeline = await getPersonalTimeline(req.user.id, days);
+    // TimelineScreen.js espera array direto em response.data
+    res.json(timeline);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // --- User Profile (rota faltante chamada pelo mobile) ---
 v1Router.get('/users/profile', authenticateToken, lightCache(30), async (req, res, next) => {
   try {
