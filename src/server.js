@@ -314,6 +314,14 @@ const transactionSchema = z.object({
   confirmWarning: z.boolean().optional(),
 });
 
+// [FASE 3.2] Schema para tracking de transação não concretizada após aviso.
+// NÃO é cancelar uma Transaction — é registrar uma decisão comportamental.
+const cancelTransactionSchema = z.object({
+  category: z.string().min(1).max(64),
+  amount:   z.number().positive(),
+  reason:   z.string().max(280).optional(),
+});
+
 const goalSchema = z.object({
   title:        z.string().min(1),
   targetAmount: z.number().positive(),
@@ -476,6 +484,33 @@ v1Router.delete('/transactions/:id', authenticateToken, async (req, res, next) =
       where: { id: req.params.id, ...tenantWhere(req.user) },
     });
     res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// [FASE 3.2] POST /transactions/cancel — tracking comportamental.
+// Registra a DECISÃO do usuário de NÃO concretizar uma transação após
+// receber um aviso. NÃO cria/altera Transaction. Apenas emite um Event
+// do tipo 'transaction_cancelled_after_warning' (já consumido em 3 lugares
+// por behaviorMetrics.js, alimentando /analytics/timeline).
+v1Router.post('/transactions/cancel', authenticateToken, async (req, res, next) => {
+  try {
+    const payload = {
+      ...req.body,
+      amount: Number(req.body.amount),
+    };
+    const result = parseRequest(cancelTransactionSchema, payload);
+    if (!result.success) {
+      return res.status(400).json({ error: result.errors.join(', ') });
+    }
+    const { category, amount, reason } = result.data;
+    await trackTelemetry(req.user.id, 'transaction_cancelled_after_warning', {
+      category,
+      amount,
+      reason: reason || null,
+    });
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
