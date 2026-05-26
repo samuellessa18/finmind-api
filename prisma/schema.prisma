@@ -43,15 +43,16 @@ model User {
   createdAt           DateTime  @default(now())
   environmentId       String?
   lgpdConsentAt       DateTime? // [MÉDIO-6] LGPD Art. 7, I — timestamp do consentimento
+  aiUnlockedUntil     DateTime? // [FASE 3.3] Janela de desbloqueio temporário de IA (via rewarded ad). Null = sem unlock ativo.
 
-  environment    Environment?   @relation(fields: [environmentId], references: [id])
-  transactions   Transaction[]
-  goals          Goal[]
-  insights       Insight[]
-  userProfile    UserProfile?
-  dailySnapshots DailySnapshot[]
-  notifications  Notification[]
-  patternAlerts  PatternAlert[]
+  environment      Environment?      @relation(fields: [environmentId], references: [id])
+  transactions     Transaction[]
+  goals            Goal[]
+  insights         Insight[]
+  userProfile      UserProfile?
+  dailySnapshots   DailySnapshot[]
+  notifications    Notification[]
+  patternAlerts    PatternAlert[]
   aiUsage          AIUsage[]
   events           Event[]
   growthActions    GrowthAction[]
@@ -59,9 +60,9 @@ model User {
   bankAccounts     BankAccount[]
   bankTransactions BankTransaction[]
 
-  @@index([email])           // Busca por email no login
-  @@index([googleId])        // Busca no OAuth Google
-  @@index([createdAt])       // Métricas de admin segmentadas por data
+  @@index([email]) // Busca por email no login
+  @@index([googleId]) // Busca no OAuth Google
+  @@index([createdAt]) // Métricas de admin segmentadas por data
 }
 
 model Environment {
@@ -74,7 +75,7 @@ model Environment {
 model Transaction {
   id          String   @id @default(cuid())
   userId      String
-  type        String   // "income" | "expense"
+  type        String // "income" | "expense"
   category    String
   amount      Float
   date        DateTime
@@ -82,9 +83,9 @@ model Transaction {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])           // Todas as queries de transação filtram por userId
-  @@index([userId, date])     // Queries de resumo mensal
-  @@index([userId, type])     // Filtros por tipo (receita/despesa)
+  @@index([userId]) // Todas as queries de transação filtram por userId
+  @@index([userId, date]) // Queries de resumo mensal
+  @@index([userId, type]) // Filtros por tipo (receita/despesa)
 }
 
 model Goal {
@@ -105,7 +106,7 @@ model Insight {
   id        String   @id @default(cuid())
   userId    String
   message   String
-  type      String   // "warning" | "suggestion" | "achievement"
+  type      String // "warning" | "suggestion" | "achievement"
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -142,7 +143,7 @@ model Notification {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, read])    // Busca de notificações não lidas
+  @@index([userId, read]) // Busca de notificações não lidas
 }
 
 model UserProfile {
@@ -161,7 +162,7 @@ model PatternAlert {
   category   String
   percentage Float
   message    String
-  severity   String   // "low" | "medium" | "high"
+  severity   String // "low" | "medium" | "high"
   detectedAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -174,14 +175,14 @@ model Event {
   userId    String?
   type      String
   category  String?
-  metadata  String?  // JSON stringificado
+  metadata  String? // JSON stringificado
   createdAt DateTime @default(now())
 
   user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([userId])
-  @@index([type])            // Queries de telemetria por tipo de evento
-  @@index([createdAt])       // Métricas de admin segmentadas por data
+  @@index([type]) // Queries de telemetria por tipo de evento
+  @@index([createdAt]) // Métricas de admin segmentadas por data
 }
 
 model AIUsage {
@@ -193,7 +194,7 @@ model AIUsage {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, date])
-  @@index([userId, date])    // Query diária de uso de IA
+  @@index([userId, date]) // Query diária de uso de IA
 }
 
 model AuthCode {
@@ -203,8 +204,8 @@ model AuthCode {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  @@index([expiresAt])       // Limpeza eficiente de códigos expirados
-  @@index([userId])          // Limpeza por usuário no callback
+  @@index([expiresAt]) // Limpeza eficiente de códigos expirados
+  @@index([userId]) // Limpeza por usuário no callback
 }
 
 model GrowthAction {
@@ -226,45 +227,45 @@ model GrowthAction {
 // ─── Open Finance (Pluggy) ───────────────────────────────────
 
 model BankConnection {
-  id                 String    @id @default(cuid())
-  userId             String
+  id               String    @id @default(cuid())
+  userId           String
   // pluggyItemId armazenado criptografado (AES-256-GCM) — nunca em plaintext
-  pluggyItemIdEnc    String    @unique
+  pluggyItemIdEnc  String    @unique
   // HMAC-SHA256 determinístico para lookup eficiente (não é reversível)
-  pluggyItemIdHmac   String    @unique
-  institutionId      String
-  institutionName    String
-  institutionLogo    String?
+  pluggyItemIdHmac String    @unique
+  institutionId    String
+  institutionName  String
+  institutionLogo  String?
   // UPDATING | UPDATED | LOGIN_ERROR | OUTDATED | WAITING_USER_INPUT
-  status             String    @default("UPDATING")
-  errorCode          String?
-  errorMessage       String?
-  consentExpiresAt   DateTime?
-  lastSyncAt         DateTime?
-  lastSyncTxCount    Int       @default(0)
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  status           String    @default("UPDATING")
+  errorCode        String?
+  errorMessage     String?
+  consentExpiresAt DateTime?
+  lastSyncAt       DateTime?
+  lastSyncTxCount  Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   accounts BankAccount[]
 
   @@index([userId])
   @@index([userId, status])
-  @@index([consentExpiresAt])   // Para job de expiração de consentimento
+  @@index([consentExpiresAt]) // Para job de expiração de consentimento
 }
 
 model BankAccount {
-  id                   String    @id @default(cuid())
-  connectionId         String
-  userId               String
+  id                  String    @id @default(cuid())
+  connectionId        String
+  userId              String
   // pluggyAccountId criptografado
-  pluggyAccountIdEnc   String    @unique
+  pluggyAccountIdEnc  String    @unique
   // HMAC-SHA256 para lookup
-  pluggyAccountIdHmac  String    @unique
-  type                 String    // BANK | CREDIT
-  subtype             String?   // CHECKING | SAVINGS | CREDIT_CARD
+  pluggyAccountIdHmac String    @unique
+  type                String // BANK | CREDIT
+  subtype             String? // CHECKING | SAVINGS | CREDIT_CARD
   name                String
-  number              String?   // últimos 4 dígitos apenas (não criptografar)
+  number              String? // últimos 4 dígitos apenas (não criptografar)
   balance             Float     @default(0)
   balanceDate         DateTime?
   currencyCode        String    @default("BRL")
@@ -280,23 +281,23 @@ model BankAccount {
 }
 
 model BankTransaction {
-  id               String    @id @default(cuid())
-  accountId        String
-  userId           String
+  id              String   @id @default(cuid())
+  accountId       String
+  userId          String
   // pluggyTxId não é PII — é apenas ID de referência do Pluggy
-  pluggyTxId       String    @unique
-  date             DateTime
-  description      String
-  amount           Float     // positivo = crédito, negativo = débito
-  currencyCode     String    @default("BRL")
-  type             String    // DEBIT | CREDIT
-  pluggyCategory   String?   // categoria original do Pluggy
-  finmindCategory  String?   // normalizada para categorias do FinMind
-  merchant         String?   // nome do estabelecimento (se disponível)
-  balance          Float?    // saldo após transação (se disponível)
+  pluggyTxId      String   @unique
+  date            DateTime
+  description     String
+  amount          Float // positivo = crédito, negativo = débito
+  currencyCode    String   @default("BRL")
+  type            String // DEBIT | CREDIT
+  pluggyCategory  String? // categoria original do Pluggy
+  finmindCategory String? // normalizada para categorias do FinMind
+  merchant        String? // nome do estabelecimento (se disponível)
+  balance         Float? // saldo após transação (se disponível)
   // null = não importada; preenchida após o usuário importar para Transaction
-  importedTxId     String?
-  createdAt        DateTime  @default(now())
+  importedTxId    String?
+  createdAt       DateTime @default(now())
 
   account BankAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
   user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -304,5 +305,5 @@ model BankTransaction {
   @@index([accountId, date])
   @@index([userId, date])
   @@index([userId, finmindCategory])
-  @@index([importedTxId])          // Para checar duplicatas
+  @@index([importedTxId]) // Para checar duplicatas
 }
