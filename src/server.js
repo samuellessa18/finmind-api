@@ -101,6 +101,7 @@ const {
 const { addXP }                               = require('./services/gamificationService');
 const { loadUserById, tenantWhere }           = require('./services/tenantService');
 const { trackTelemetry }                      = require('./services/telemetryService');
+const { hasActiveTemporaryAI }                = require('./services/aiAccess'); // [FASE 3.4]
 const { verifyGoogleToken, findOrCreateGoogleUser } = require('./services/googleAuth');
 const { runGrowthEngine }                     = require('./services/growthEngineService');
 
@@ -220,6 +221,21 @@ const insightsLimiter = rateLimit({
   keyGenerator: (req) => req.user?.id || req.ip, // por usuário autenticado
 });
 
+// [FASE 3.4] Rate limit para desbloqueio de IA via rewarded ad.
+// 5 unlocks por janela de 24h por usuário. Cold start do Render pode
+// resetar o contador in-memory — aceitável para MVP (sem AdMob SSV ainda).
+const adsUnlockLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 5,
+  message: {
+    error: 'Limite diário de desbloqueios atingido. Volte amanhã.',
+    code:  'RATE_LIMIT_AD_UNLOCK',
+  },
+  standardHeaders: true,
+  legacyHeaders:   false,
+  keyGenerator: (req) => `ad_unlock:${req.user?.id || req.ip}`,
+});
+
 // [ALTO-2] Rate limit para endpoint público de telemetria
 const publicTrackLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -320,6 +336,12 @@ const cancelTransactionSchema = z.object({
   category: z.string().min(1).max(64),
   amount:   z.number().positive(),
   reason:   z.string().max(280).optional(),
+});
+
+// [FASE 3.4] Schema para desbloqueio temporário de IA via rewarded ad.
+// `source` é só telemetria — qual tela disparou (home/insights/simulation).
+const unlockAiSchema = z.object({
+  source: z.string().max(64).optional(),
 });
 
 const goalSchema = z.object({
@@ -679,6 +701,34 @@ v1Router.get('/analytics/timeline', authenticateToken, async (req, res, next) =>
   }
 });
 
+// [FASE 3.4] POST /ads/unlock-ai — concede 1h de acesso a IA após o usuário
+// assistir um rewarded ad. NÃO valida ad token (AdMob SSV) nesta fase —
+// "trusted client" assumption. Anti-fraude limitado a rate-limit 5/24h/user.
+// TODO Fase 6: integrar AdMob Server-Side Verification (SSV) com nonce.
+v1Router.post('/ads/unlock-ai', authenticateToken, adsUnlockLimiter, async (req, res, next) => {
+  try {
+    const result = parseRequest(unlockAiSchema, req.body || {});
+    if (!result.success) {
+      return res.status(400).json({ error: result.errors.join(', ') });
+    }
+    const source = result.data.source || 'unknown';
+
+    // +1h a partir de agora. Substitui qualquer unlock anterior (não estende).
+    const aiExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data:  { aiUnlockedUntil: aiExpiresAt },
+    });
+
+    await trackTelemetry(req.user.id, 'reward_ad_used', { source });
+
+    return res.json({ ok: true, aiExpiresAt });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // --- User Profile (rota faltante chamada pelo mobile) ---
 v1Router.get('/users/profile', authenticateToken, lightCache(30), async (req, res, next) => {
   try {
@@ -689,10 +739,19 @@ v1Router.get('/users/profile', authenticateToken, lightCache(30), async (req, re
         monthlyIncome: true, streakDays: true, xp: true, level: true,
         isPremium: true, plan: true, onboardingCompleted: true,
         lastCheckIn: true, createdAt: true, provider: true,
+        aiUnlockedUntil: true, // [FASE 3.4] usado para derivar campos — não exposto
       },
     });
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
-    res.json(user);
+
+    // [FASE 3.4] Deriva estado do unlock temporário sem expor o timestamp bruto.
+    // Atenção: lightCache(30) acima pode servir resposta defasada por até 30s
+    // após o usuário desbloquear — o mobile mitiga com state local imediato.
+    const hasTemporaryAI = hasActiveTemporaryAI(user);
+    const aiExpiresAt    = hasTemporaryAI ? user.aiUnlockedUntil : null;
+    const { aiUnlockedUntil, ...publicUser } = user;
+
+    res.json({ ...publicUser, hasTemporaryAI, aiExpiresAt });
   } catch (error) {
     next(error);
   }

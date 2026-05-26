@@ -12,7 +12,8 @@ async function loadUserById(userId) {
       streakDays: true,
       xp: true,
       level: true,
-      plan: true
+      plan: true,
+      aiUnlockedUntil: true  // [FASE 3.4] necessário para canUseAI() em rotas de IA
     }
   });
 }
