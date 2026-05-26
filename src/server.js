@@ -101,7 +101,8 @@ const {
 const { addXP }                               = require('./services/gamificationService');
 const { loadUserById, tenantWhere }           = require('./services/tenantService');
 const { trackTelemetry }                      = require('./services/telemetryService');
-const { hasActiveTemporaryAI }                = require('./services/aiAccess'); // [FASE 3.4]
+const { hasActiveTemporaryAI, canUseAI }      = require('./services/aiAccess'); // [FASE 3.4/3.5]
+const { generateInsight }                     = require('./services/insightGenerator'); // [FASE 3.5]
 const { verifyGoogleToken, findOrCreateGoogleUser } = require('./services/googleAuth');
 const { runGrowthEngine }                     = require('./services/growthEngineService');
 
@@ -700,6 +701,87 @@ v1Router.get('/analytics/timeline', authenticateToken, async (req, res, next) =>
     next(error);
   }
 });
+
+// [FASE 3.5] Middleware inline: gate de acesso a IA (premium OU unlock ativo).
+// Vem ANTES do usageLimiter para não queimar cota de usuários que não têm acesso.
+function requireAIAccess(req, res, next) {
+  if (!canUseAI(req.user)) {
+    return res.status(403).json({
+      error: 'IA disponível apenas no Premium ou via desbloqueio temporário.',
+      code:  'AI_ACCESS_DENIED',
+    });
+  }
+  next();
+}
+
+// [FASE 3.5] GET /insights — últimos 20 insights do usuário, mais recentes primeiro.
+// Insights são criados aqui (POST /insights/generate) e pelo dailyAnalysisJob.
+v1Router.get('/insights', authenticateToken, async (req, res, next) => {
+  try {
+    const insights = await prisma.insight.findMany({
+      where:   { userId: req.user.id },
+      orderBy: { createdAt: 'desc' },
+      take:    20,
+      select:  { id: true, type: true, message: true, createdAt: true },
+    });
+    res.json(insights);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// [FASE 3.5] POST /insights/generate — gera 1 novo insight determinístico.
+// SEM OpenAI nesta fase. Pipeline:
+//   authenticateToken → requireAIAccess → usageLimiter → handler
+// Resposta: o registro Insight criado (objeto direto, não envelope).
+v1Router.post(
+  '/insights/generate',
+  authenticateToken,
+  requireAIAccess,
+  usageLimiter('ai_insight'),
+  async (req, res, next) => {
+    try {
+      const userId = req.user.id;
+      // Janela 90d evita carregar histórico completo (performance + LGPD)
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+
+      const [user, transactions, goals] = await Promise.all([
+        prisma.user.findUnique({
+          where:  { id: userId },
+          select: { id: true, monthlyIncome: true, streakDays: true, level: true },
+        }),
+        prisma.transaction.findMany({
+          where:  { userId, date: { gte: ninetyDaysAgo } },
+          select: { type: true, amount: true, date: true, category: true },
+        }),
+        prisma.goal.findMany({
+          where:  { userId },
+          select: { id: true, title: true, targetAmount: true, currentAmount: true, deadline: true },
+        }),
+      ]);
+
+      if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+      const summary = calculateSummary(user, transactions, goals);
+      const { type, message } = generateInsight({
+        user,
+        summary,
+        hasTransactions: transactions.length > 0,
+      });
+
+      const insight = await prisma.insight.create({
+        data:   { userId, type, message },
+        select: { id: true, type: true, message: true, createdAt: true },
+      });
+
+      // Mobile espera objeto direto em response.data (não envelope)
+      res.json(insight);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 // [FASE 3.4] POST /ads/unlock-ai — concede 1h de acesso a IA após o usuário
 // assistir um rewarded ad. NÃO valida ad token (AdMob SSV) nesta fase —
