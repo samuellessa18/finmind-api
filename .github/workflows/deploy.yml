@@ -1,51 +1,100 @@
 name: Backend CI/CD
 
+# [FASE 7] Quality gate antes do deploy + verificação pós-deploy.
+# Sem isso, qualquer commit broken vai para produção. Render só verifica build,
+# não sintaxe nem schema Prisma nem vulnerabilidades.
+
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
 
+# Permite cancelar runs antigos quando há push novo (economiza CI)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: package-lock.json
 
-      - name: Install dependencies
-        run: npm install
+      # npm ci (reproducível) — falha se package-lock estiver fora de sync.
+      # NÃO usar npm install em CI: divergência silenciosa entre dev e prod.
+      - name: Install dependencies (npm ci)
+        run: npm ci --no-audit --no-fund
 
+      # DATABASE_URL fake para que `prisma generate` consiga gerar o client.
+      # Não conecta no DB real — apenas materializa @prisma/client em node_modules.
       - name: Generate Prisma Client
-        run: npx prisma generate
+        run: npx prisma generate --schema=./prisma/schema.prisma
         env:
-          DATABASE_URL: "file:./dev.db" # Mock URL for client generation
+          DATABASE_URL: "postgresql://stub:stub@localhost:5432/stub"
 
-      - name: Syntax Check
-        run: node -c src/server.js
+      # Roda o mesmo script que dev usa localmente — DRY (uma fonte de verdade).
+      # Cobre: node --check em TODOS .js de src/ e scripts/, prisma validate,
+      # smoke de imports de server.js.
+      - name: Run validation suite
+        run: npm run validate
+
+  security-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Roda em paralelo com validate (não bloqueia)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci --no-audit --no-fund
+
+      # Falha se houver vulnerabilidade HIGH ou CRITICAL.
+      # MODERATE é warning não-bloqueante (alguns deps transitivos têm FPs).
+      - name: npm audit (high/critical bloqueante)
+        run: npm audit --audit-level=high
 
   health-check:
     needs: validate
+    # Só roda em push para main (não em PR) — após Render fazer deploy.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Wait for Deploy (60s)
-        run: sleep 60
-
-      - name: API Health Check
+      - name: Wait for Render deploy + health check (retry loop)
         run: |
           API_URL="https://finmind-api.onrender.com/api/health"
-          echo "Pinging $API_URL..."
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" $API_URL)
-          if [ "$STATUS" -ne 200 ]; then
-            echo "❌ API Health Check failed with status $STATUS"
-            exit 1
-          else
-            echo "✅ API is Healthy!"
-          fi
+          MAX_ATTEMPTS=20
+          # 20 * 15s = 5min total (Render free pode demorar com cold start)
+          attempt=1
+          while [ $attempt -le $MAX_ATTEMPTS ]; do
+            status=$(curl -s -o /tmp/health.json -w "%{http_code}" --max-time 10 "$API_URL" || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "✅ Health OK na tentativa $attempt:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "  [tentativa $attempt/$MAX_ATTEMPTS] status=$status — aguardando 15s..."
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+          echo "❌ Health check FALHOU após $MAX_ATTEMPTS tentativas (5min)."
+          echo "Render pode ter falhado no build OU cold start excessivo."
+          echo "Última resposta:"
+          curl -sS --max-time 10 "$API_URL" || echo "(sem resposta)"
+          exit 1

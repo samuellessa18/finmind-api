@@ -1,0 +1,36 @@
+# [FASE 7] Dependabot — abre PRs automáticos com upgrades de dependências.
+# Roda semanalmente para não inundar; security alerts ainda são imediatos.
+# CI valida cada PR (validate + security-audit) antes de qualquer merge.
+
+version: 2
+updates:
+  # npm — backend
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 5
+    # Agrupa updates de patch/minor de prod e dev separados — menos PRs ruidosos
+    groups:
+      prod-minor-patch:
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+      dev-minor-patch:
+        dependency-type: "development"
+        update-types: ["minor", "patch"]
+    # Major updates ficam separados (decisão consciente)
+    labels:
+      - "dependencies"
+
+  # GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"

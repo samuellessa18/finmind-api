@@ -1,25 +1,30 @@
 # ──────────────────────────────────────────────────────────────
 # FinMind API — render.yaml
-# PATCHED: Auditoria de Segurança
+# [FASE 7] Sincronizado com o painel real do Render.
 #
-# Correções aplicadas:
-#  1. REMOVIDO: npx prisma db push --accept-data-loss (DESTRUTIVO)
-#     SUBSTITUÍDO por: npx prisma migrate deploy (SEGURO)
-#  2. REMOVIDO: node prisma-nuclear-fix.js do pipeline automático
-#  3. SUBSTITUÍDO: npm install → npm ci (builds reproduzíveis)
-#  4. healthCheckPath mantido em /api/health
+# IMPORTANTE: o painel do Render é a fonte de verdade. Este arquivo
+# documenta a configuração esperada. Drift entre painel e arquivo é
+# checkado manualmente (sem reconciliação automática).
+#
+# Histórico:
+#  - REMOVIDO: npx prisma db push --accept-data-loss (DESTRUTIVO)
+#  - REMOVIDO: node prisma-nuclear-fix.js
+#  - ADICIONADO: scripts/prisma-baseline.js (idempotente, fase 1)
+#  - ADICIONADO: --schema=./prisma/schema.prisma (fase de baseline)
+#  - ADICIONADO: SENTRY_DSN/ENVIRONMENT/RELEASE (fase 4)
 # ──────────────────────────────────────────────────────────────
 
 services:
   - type: web
     name: finmind-api
     env: node
-    plan: free  # Considerar upgrade para eliminar cold start (OAuth timeout)
+    plan: free  # Considerar upgrade para eliminar cold start
     region: oregon
 
-    # CORRIGIDO: npm ci garante versões exatas do package-lock.json
-    # CORRIGIDO: prisma migrate deploy (seguro) ao invés de db push --accept-data-loss
-    buildCommand: npm ci && npx prisma generate && npx prisma migrate deploy
+    # Build command — espelha exatamente o painel Render.
+    # npm install (não npm ci) por compatibilidade com regen de lockfile do npm audit fix.
+    # Trocar para npm ci após validar que lockfile no repo é sempre commitado.
+    buildCommand: npm install && npx prisma generate --schema=./prisma/schema.prisma && node scripts/prisma-baseline.js && npx prisma migrate deploy --schema=./prisma/schema.prisma
 
     startCommand: node src/server.js
     healthCheckPath: /api/health
@@ -49,3 +54,11 @@ services:
         sync: false   # Gerar: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
       - key: GROWTH_ROLLOUT_PERCENTAGE
         value: "10"
+
+      # [FASE 4] Observabilidade — opcional. Sem DSN, Sentry no-op.
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+      - key: SENTRY_RELEASE
+        sync: false   # Pode usar git SHA via auto-set
