@@ -1,4 +1,25 @@
+// ────────────────────────────────────────────────────────────────────────────
+// [FASE 5] DEPRECATED — Não importar nem usar generateDailyCoach.
+//
+// Esta função tem incompatibilidades estruturais com a saída atual de
+// calculateSummary que causariam crashes ou mensagens silenciosamente erradas:
+//   - savingsRate em escala % (0–100) vs fração (0–1) esperada
+//   - riskLevel real é 'HIGH'/'MEDIUM'/'LOW' (uppercase EN); espera 'ALTO' (PT)
+//   - predictedExpenses é undefined (o campo real chama-se projectedExpenses)
+//   - trend / trendDirection são placeholders sempre null
+//
+// Substituído por services/insightGenerator.generateInsight, que é a fonte
+// única de mensagens determinísticas, em uso tanto no daily cron quanto na
+// rota manual POST /insights/generate.
+//
+// Mantido como código morto (não removido) até a próxima fase decidir entre:
+//   (a) integração OpenAI mantendo este arquivo como fallback,
+//   (b) remoção definitiva.
+// Zero callers no codebase atual (grep confirma).
+// ────────────────────────────────────────────────────────────────────────────
+
 /**
+ * @deprecated since FASE 5 — use services/insightGenerator.generateInsight
  * Generates a behavioral financial insight based on user summary and behavioral metrics.
  */
 function generateDailyCoach({ summary, user, behavior }) {

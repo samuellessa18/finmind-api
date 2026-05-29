@@ -2,7 +2,13 @@ const cron = require('node-cron');
 const prisma = require('../../prisma/client');
 const { calculateSummary, detectCategorySuggestions } = require('../engine/financialEngine');
 const { getEmotionalAnalyticsSummary } = require('../analytics/behaviorMetrics');
-const { generateDailyCoach } = require('../engine/coachEngine');
+// [FASE 5] Substituído coachEngine.generateDailyCoach por insightGenerator.
+// Motivo: coachEngine espera shape de summary incompatível com calculateSummary
+// (savingsRate em fração vs %, riskLevel 'ALTO' vs 'HIGH', predictedExpenses vs
+// projectedExpenses, trend sempre null). insightGenerator é a fonte única de
+// mensagens determinísticas, já em uso em /insights/generate (validado 11/11).
+// coachEngine.js fica como código morto documentado — não removido.
+const { generateInsight } = require('../services/insightGenerator');
 // [FASE 4] Observabilidade — no-op se Sentry não configurado
 const { captureException } = require('../lib/sentry');
 
@@ -34,26 +40,29 @@ async function runDailyAnalysis() {
         const summary = calculateSummary(user, transactions, goals);
         const behaviorSummary = await getEmotionalAnalyticsSummary(user.id);
 
+        // [FASE 5] Correção B1/B2: campos do summary têm nomes diferentes
+        //   summary.monthlyExpenses → não existe; usar summary.totalExpenses
+        //   summary.predictedExpenses → não existe; usar summary.projectedExpenses
+        // Sem esses fixes, prisma.dailySnapshot.create crashava com
+        // "Argument 'monthlyExpenses' must not be null" pois ambos são Float NOT NULL.
         await prisma.dailySnapshot.create({
           data: {
             userId: user.id,
             balance: summary.balance,
-            monthlyExpenses: summary.monthlyExpenses,
+            monthlyExpenses: summary.totalExpenses,
             savingsRate: summary.savingsRate,
             riskLevel: summary.riskLevel,
-            predictedExpenses: summary.predictedExpenses
+            predictedExpenses: summary.projectedExpenses
           }
         });
 
-        // 🧠 GENERATE BRAIN COACH MESSAGE
-        const coach = generateDailyCoach({
-            summary,
+        // [FASE 5] 🧠 GENERATE BRAIN COACH MESSAGE
+        // Substituído generateDailyCoach (bug crítico — incompatibilidade de shape)
+        // por insightGenerator determinístico (mesma fonte do /insights/generate manual).
+        const coach = generateInsight({
             user,
-            behavior: {
-                preventedExpenses: behaviorSummary.metrics.weeklyCancelled,
-                confirmedRisks: behaviorSummary.metrics.weeklyConfirmed,
-                smartEngagementRate: behaviorSummary.metrics.smartEngagementRate
-            }
+            summary,
+            hasTransactions: transactions.length > 0
         });
 
         // 💾 Save Coach Insight
@@ -66,13 +75,14 @@ async function runDailyAnalysis() {
         });
 
         // 🔔 Notification for Coach
+        // [FASE 5] B4 fix: riskLevel real é 'HIGH', não 'ALTO'.
         await prisma.notification.create({
             data: {
                 userId: user.id,
                 title: '💡 Dica do Coach Financeiro',
                 message: coach.message,
                 type: 'ai_coach',
-                priority: summary.riskLevel === 'ALTO' ? 'high' : 'medium'
+                priority: summary.riskLevel === 'HIGH' ? 'high' : 'medium'
             }
         });
 
@@ -84,7 +94,9 @@ async function runDailyAnalysis() {
 
         let notifications = [];
 
-        if (summary.riskLevel === 'ALTO' && (!lastSnapshot || lastSnapshot.riskLevel !== 'ALTO')) {
+        // [FASE 5] B5 fix: calculateSummary retorna 'HIGH' (uppercase EN),
+        // não 'ALTO' (PT). Lógica: notificar somente quando RISCO subiu para HIGH.
+        if (summary.riskLevel === 'HIGH' && (!lastSnapshot || lastSnapshot.riskLevel !== 'HIGH')) {
           const preventionMessage = behaviorSummary.emotional.preventionMessage;
           notifications.push({
             userId: user.id,
@@ -95,7 +107,10 @@ async function runDailyAnalysis() {
           });
         }
 
-        if (summary.percentageMonthUsed > 80 && (!lastSnapshot || lastSnapshot.monthlyExpenses < summary.monthlyExpenses)) {
+        // [FASE 5] B6 fix: summary.monthlyExpenses não existe — usar totalExpenses.
+        // Comparação contra lastSnapshot.monthlyExpenses (que agora será gravado
+        // corretamente a partir de summary.totalExpenses pelo bloco acima).
+        if (summary.percentageMonthUsed > 80 && (!lastSnapshot || lastSnapshot.monthlyExpenses < summary.totalExpenses)) {
           const weeklyCancelled = behaviorSummary.metrics.weeklyCancelled;
           const message = weeklyCancelled > 0
             ? `Você evitou ${weeklyCancelled} gasto${weeklyCancelled > 1 ? 's' : ''} impulsivo${weeklyCancelled > 1 ? 's' : ''} essa semana — continue assim!`
@@ -109,6 +124,12 @@ async function runDailyAnalysis() {
           });
         }
 
+        // [FASE 5] B7/B8 documentação: summary.trend e summary.trendDirection são
+        // sempre null hoje (placeholders em financialEngine.calculateSummary linhas 96-97).
+        // Estes 2 blocos (📈 Gastos em Alta / 📉 Progresso na Economia) ficam DORMENTES
+        // até trend ser implementado com série histórica de DailySnapshots. Fora do
+        // escopo desta fase (exigiria refactor do calculateSummary). Mantidos como
+        // estão para preservar a lógica intencional quando o trend for ativado.
         if (summary.trend > 0.15 && summary.trendDirection === 'up') {
           const engagementMessage = behaviorSummary.emotional.engagementMessage;
           notifications.push({
