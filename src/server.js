@@ -118,6 +118,9 @@ const errorHandler        = require('./middleware/errorHandler');
 const lightCache          = require('./middleware/cache');
 const { authenticateToken } = require('./middleware/auth');
 const { checkConsentExpiry } = require('./services/openFinanceService');
+// [FASE 4] Observabilidade — init defensivo (no-op se SENTRY_DSN ausente)
+const { initSentry, captureException, wrapCron, flush: flushSentry, Handlers: SentryHandlers } = require('./lib/sentry');
+initSentry();
 
 // ─────────────────────────────────────────────────────────────
 // 3. INICIALIZAÇÃO DO APP
@@ -127,6 +130,15 @@ const app = express();
 // Trust proxy: obrigatório para Render (Nginx reverso)
 // Garante que req.ip retorne o IP real do cliente (rate limiting correto)
 app.set('trust proxy', 1);
+
+// [FASE 4] Sentry request handler — DEVE vir antes de qualquer middleware
+// para que erros em middlewares posteriores tenham contexto da request.
+// No-op gracioso se Sentry não foi inicializado (DSN ausente).
+app.use(SentryHandlers.requestHandler({
+  // Não capturar dados sensíveis — beforeSend ainda passa por scrubbing
+  request: ['method', 'url', 'query_string', 'headers'],
+  user:    false,  // não capturar user automaticamente; setamos manualmente
+}));
 
 // ─────────────────────────────────────────────────────────────
 // 4. HELMET — Headers de segurança HTTP
@@ -968,18 +980,33 @@ app.use('/api/v1', v1Router);
 // ─────────────────────────────────────────────────────────────
 // 14. GLOBAL ERROR HANDLER
 // ─────────────────────────────────────────────────────────────
+// [FASE 4] Sentry error handler — vem ANTES do errorHandler custom.
+// Captura o erro e chama next(err) — não responde nem altera o fluxo.
+// Já é seletivo: por padrão captura status >= 500.
+app.use(SentryHandlers.errorHandler({
+  shouldHandleError(error) {
+    const status = error.status || error.statusCode;
+    // Não capturar 4xx (auth, validation) — fluxo normal
+    return !status || status >= 500;
+  },
+}));
 app.use(errorHandler);
 
 // ─────────────────────────────────────────────────────────────
 // 15. PROCESS ERROR HANDLERS
 // ─────────────────────────────────────────────────────────────
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', async (err) => {
   console.error('❌ [CRITICAL] Uncaught Exception:', err);
+  captureException(err, { tags: { handler: 'uncaughtException' } });
+  await flushSentry(2000);
   process.exit(1);
 });
 
-process.on('unhandledRejection', (reason) => {
+process.on('unhandledRejection', async (reason) => {
   console.error('❌ [CRITICAL] Unhandled Rejection:', reason);
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  captureException(err, { tags: { handler: 'unhandledRejection' } });
+  await flushSentry(2000);
   process.exit(1);
 });
 
@@ -1011,6 +1038,7 @@ async function startServer() {
           await runGrowthEngine();
         } catch (err) {
           console.error('[GROWTH ERROR]', err);
+          captureException(err, { tags: { cron: 'growth_engine' } });
         }
       });
 
@@ -1025,6 +1053,7 @@ async function startServer() {
           if (count > 0) console.log(`[OpenFinance] ${count} consentimentos marcados como expirados.`);
         } catch (err) {
           console.error('[OpenFinance] Erro no job de expiração:', err.message);
+          captureException(err, { tags: { cron: 'open_finance_consent_expiry' } });
         }
       });
 
@@ -1039,6 +1068,7 @@ async function startServer() {
           console.log(`[LGPD Retention] Removidos: ${deletedEvents.count} events, ${deletedCodes.count} auth codes expirados.`);
         } catch (err) {
           console.error('[LGPD Retention] Erro na limpeza:', err.message);
+          captureException(err, { tags: { cron: 'lgpd_retention' } });
         }
       });
     });

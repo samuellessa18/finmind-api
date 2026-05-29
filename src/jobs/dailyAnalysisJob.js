@@ -3,6 +3,8 @@ const prisma = require('../../prisma/client');
 const { calculateSummary, detectCategorySuggestions } = require('../engine/financialEngine');
 const { getEmotionalAnalyticsSummary } = require('../analytics/behaviorMetrics');
 const { generateDailyCoach } = require('../engine/coachEngine');
+// [FASE 4] Observabilidade — no-op se Sentry não configurado
+const { captureException } = require('../lib/sentry');
 
 // prisma instance imported above
 
@@ -208,12 +210,18 @@ async function runDailyAnalysis() {
         }
       } catch (error) {
         console.error(`[DailyAnalysis] Erro ao processar usuário ${user.id}:`, error.message);
+        // [FASE 4] Captura por-user para diagnosticar bugs silenciosos como o do coachEngine
+        captureException(error, {
+          tags: { cron: 'daily_analysis', stage: 'per_user' },
+          userId: user.id,
+        });
       }
     }
 
     console.log('[DailyAnalysis] Análise diária concluída!');
   } catch (error) {
     console.error('[DailyAnalysis] Erro geral:', error);
+    captureException(error, { tags: { cron: 'daily_analysis', stage: 'top_level' } });
   }
 }
 

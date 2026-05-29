@@ -1,6 +1,8 @@
 const cron = require('node-cron');
 const prisma = require('../../prisma/client');
 const { calculateSummary } = require('./financialEngine');
+// [FASE 4] Observabilidade — no-op se Sentry não configurado
+const { captureException } = require('../lib/sentry');
 
 function isSameDay(dateA, dateB) {
   const a = new Date(dateA);
@@ -146,6 +148,7 @@ async function runNotificationScheduler() {
     }
   } catch (error) {
     console.error('[NotificationScheduler] Erro ao gerar notificações:', error);
+    captureException(error, { tags: { cron: 'notification_scheduler' } });
   }
 }
 
