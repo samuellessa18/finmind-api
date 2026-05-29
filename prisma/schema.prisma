@@ -59,6 +59,7 @@ model User {
   bankConnections  BankConnection[]
   bankAccounts     BankAccount[]
   bankTransactions BankTransaction[]
+  sessions         Session[]
 
   @@index([email]) // Busca por email no login
   @@index([googleId]) // Busca no OAuth Google
@@ -206,6 +207,26 @@ model AuthCode {
 
   @@index([expiresAt]) // Limpeza eficiente de códigos expirados
   @@index([userId]) // Limpeza por usuário no callback
+}
+
+// [FASE 6] JWT Revocation — controle de sessão server-side.
+// id = jti do JWT (UUID v4). Token sem jti (legacy pré-Fase 6) não tem Session
+// correspondente — middleware aceita em modo "grace period" até o token expirar
+// naturalmente (≤7 dias). Após esse prazo, todos os tokens terão jti + Session.
+model Session {
+  id        String    @id // jti do JWT — NÃO usar @default(cuid()); recebe o UUID gerado em authRoutes
+  userId    String
+  createdAt DateTime  @default(now())
+  expiresAt DateTime // alinha com expiração do JWT (iat + 7d)
+  revokedAt DateTime? // null = sessão ativa
+  ipHash    String? // SHA256(ip).slice(0,16) — não-reversível para privacy
+  userAgent String? // truncado em 255 chars
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt]) // cron cleanup eficiente
+  @@index([userId, revokedAt]) // "logout global" futuro (revogar todas as ativas do user)
 }
 
 model GrowthAction {

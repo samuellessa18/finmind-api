@@ -27,6 +27,9 @@ const { z }    = require('zod');
 const prisma   = require('../../prisma/client');
 const { trackTelemetry }              = require('../services/telemetryService');
 const { verifyGoogleToken, findOrCreateGoogleUser } = require('../services/googleAuth');
+// [FASE 6] Logout precisa de auth + invalidação de cache do profile
+const { authenticateToken } = require('../middleware/auth');
+const lightCache            = require('../middleware/cache');
 
 const router = express.Router();
 
@@ -60,15 +63,41 @@ const parseRequest = (schema, data) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// HELPER: Gerar JWT
+// HELPER: Gerar JWT + Session (FASE 6)
+// Retorna { token, jti }. O caller é responsável por persistir a Session
+// (não fazemos aqui para deixar o helper puro/testável).
 // ─────────────────────────────────────────────────────────────
+const JWT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias — alinha JWT e Session
+
 function generateJWT(user) {
   const secret = process.env.JWT_SECRET;
-  return jwt.sign(
-    { id: user.id, environmentId: user.environmentId },
+  const jti = crypto.randomUUID();
+  const token = jwt.sign(
+    { id: user.id, environmentId: user.environmentId, jti },
     secret,
-    { expiresIn: '7d' } // CORRIGIDO: era 1d — 7d melhora UX mobile sem comprometer segurança
+    { expiresIn: '7d' }
   );
+  return { token, jti };
+}
+
+// [FASE 6] Persiste a Session associada ao jti. Best-effort:
+// ipHash anonimiza (SHA256 truncado), userAgent truncado para evitar
+// payloads gigantes. Sem captureException aqui — o caller decide.
+async function createSession(jti, user, req) {
+  const ip = req.ip || '';
+  const ipHash = ip
+    ? crypto.createHash('sha256').update(ip).digest('hex').slice(0, 16)
+    : null;
+  const userAgent = (req.get('user-agent') || '').slice(0, 255) || null;
+  await prisma.session.create({
+    data: {
+      id:        jti,
+      userId:    user.id,
+      expiresAt: new Date(Date.now() + JWT_TTL_MS),
+      ipHash,
+      userAgent,
+    },
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -129,7 +158,9 @@ router.post('/auth/register', async (req, res, next) => {
       },
     });
 
-    const token = generateJWT(user);
+    // [FASE 6] JWT com jti + Session persistida
+    const { token, jti } = generateJWT(user);
+    await createSession(jti, user, req);
 
     await trackTelemetry(user.id, 'account_created', { email: user.email });
     await trackTelemetry(user.id, 'auth_success', { provider: 'local', type: 'register' });
@@ -190,7 +221,9 @@ router.post('/auth/login', async (req, res, next) => {
       return res.status(401).json({ error: 'Credenciais inválidas.' });
     }
 
-    const token = generateJWT(user);
+    // [FASE 6] JWT com jti + Session persistida
+    const { token, jti } = generateJWT(user);
+    await createSession(jti, user, req);
 
     await trackTelemetry(user.id, 'user_login', { method: 'password' });
     await trackTelemetry(user.id, 'auth_success', { provider: 'local', type: 'login' });
@@ -354,7 +387,9 @@ router.post('/auth/google/exchange', async (req, res, next) => {
     // Deletar código (one-time-use)
     await prisma.authCode.delete({ where: { id: authRecord.id } });
 
-    const token = generateJWT(user);
+    // [FASE 6] JWT com jti + Session persistida
+    const { token, jti } = generateJWT(user);
+    await createSession(jti, user, req);
 
     await trackTelemetry(user.id, 'auth_success', {
       provider: user.provider, type: 'oauth_exchange',
@@ -383,7 +418,10 @@ router.post('/auth/google/mobile', async (req, res, next) => {
   try {
     const googleData = await verifyGoogleToken(idToken);
     const user       = await findOrCreateGoogleUser(googleData);
-    const token      = generateJWT(user);
+
+    // [FASE 6] JWT com jti + Session persistida
+    const { token, jti } = generateJWT(user);
+    await createSession(jti, user, req);
 
     await trackTelemetry(user.id, 'auth_success', {
       provider: user.provider, type: 'mobile_oauth',
@@ -394,6 +432,34 @@ router.post('/auth/google/mobile', async (req, res, next) => {
     await trackTelemetry(null, 'auth_failed', {
       provider: 'google', type: 'mobile_oauth', reason: 'token_error',
     });
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// [FASE 6] POST /api/v1/auth/logout
+// Revoga a Session atual. Idempotente:
+//   - Token COM jti + Session ativa → marca revokedAt = NOW
+//   - Token COM jti + Session já revogada/inexistente → 200 ok mesmo assim
+//   - Token SEM jti (legacy pré-Fase 6) → 200 ok (apenas resposta semântica)
+// Mobile sempre chama best-effort antes de limpar storage local —
+// a resposta confirma para o user que o backend processou.
+// ─────────────────────────────────────────────────────────────
+router.post('/auth/logout', authenticateToken, async (req, res, next) => {
+  try {
+    if (req.session) {
+      // updateMany para idempotência (filtro revokedAt:null garante não-double-revoke)
+      await prisma.session.updateMany({
+        where: { id: req.session.id, revokedAt: null },
+        data:  { revokedAt: new Date() },
+      });
+    }
+    // [FIX F-1 alinhado] Invalida cache de profile para evitar leak pós-logout
+    lightCache.invalidate(`${req.user.id}:/api/v1/users/profile`);
+
+    await trackTelemetry(req.user.id, 'user_logout', { hadSession: !!req.session });
+    return res.json({ ok: true });
+  } catch (error) {
     next(error);
   }
 });

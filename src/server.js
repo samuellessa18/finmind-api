@@ -1057,15 +1057,27 @@ async function startServer() {
         }
       });
 
-      // [LGPD Art. 15] Retenção de dados: limpar Events e AuthCodes antigos semanalmente
+      // [LGPD Art. 15] Retenção de dados: limpar Events, AuthCodes e Sessions expiradas semanalmente.
+      // [FASE 6] Session cleanup: remove tanto expiradas naturalmente quanto revogadas
+      // (revogadas mantemos por curto prazo apenas para auditoria — 7d após revogação).
       cron.schedule('0 3 * * 0', async () => {
         try {
-          const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-          const [deletedEvents, deletedCodes] = await Promise.all([
+          const now = new Date();
+          const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+          const sevenDaysAgo  = new Date(now.getTime() - 7  * 24 * 60 * 60 * 1000);
+          const [deletedEvents, deletedCodes, deletedSessions] = await Promise.all([
             prisma.event.deleteMany({ where: { createdAt: { lt: ninetyDaysAgo } } }),
-            prisma.authCode.deleteMany({ where: { expiresAt: { lt: new Date() } } }),
+            prisma.authCode.deleteMany({ where: { expiresAt: { lt: now } } }),
+            prisma.session.deleteMany({
+              where: {
+                OR: [
+                  { expiresAt: { lt: now } },                  // expiradas naturalmente
+                  { revokedAt: { lt: sevenDaysAgo } },         // revogadas há mais de 7d
+                ],
+              },
+            }),
           ]);
-          console.log(`[LGPD Retention] Removidos: ${deletedEvents.count} events, ${deletedCodes.count} auth codes expirados.`);
+          console.log(`[LGPD Retention] Removidos: ${deletedEvents.count} events, ${deletedCodes.count} auth codes, ${deletedSessions.count} sessions.`);
         } catch (err) {
           console.error('[LGPD Retention] Erro na limpeza:', err.message);
           captureException(err, { tags: { cron: 'lgpd_retention' } });

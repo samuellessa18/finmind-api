@@ -13,6 +13,7 @@
 'use strict';
 
 const jwt           = require('jsonwebtoken');
+const prisma        = require('../../prisma/client');
 const { loadUserById } = require('../services/tenantService');
 
 const authenticateToken = async (req, res, next) => {
@@ -40,6 +41,36 @@ const authenticateToken = async (req, res, next) => {
       console.warn('[SECURITY] Token com payload malformado.');
       return res.status(401).json({ error: 'Token inválido.' });
     }
+
+    // [FASE 6] Validação de Session (graceful para tokens legacy):
+    //   - Token COM jti → exigir Session existente, não revogada, não expirada
+    //   - Token SEM jti → "grace period" (legado pré-Fase 6): aceitar.
+    //     Após 7 dias, todos os tokens terão jti naturalmente.
+    if (decoded.jti) {
+      const session = await prisma.session.findUnique({
+        where: { id: decoded.jti },
+        select: { id: true, userId: true, revokedAt: true, expiresAt: true },
+      });
+      if (!session) {
+        // Session nunca criada OU foi deletada pelo cron (token expirado).
+        return res.status(401).json({ error: 'Sessão inválida.' });
+      }
+      if (session.revokedAt) {
+        return res.status(401).json({ error: 'Sessão revogada. Faça login novamente.' });
+      }
+      if (session.expiresAt < new Date()) {
+        // Defesa em profundidade: jwt.verify já checa exp, mas Session pode
+        // ter expirado por outro motivo (ex: relógio desincronizado).
+        return res.status(401).json({ error: 'Sessão expirada. Faça login novamente.' });
+      }
+      // Defesa contra desalinhamento user↔session (improvável dado FK Cascade)
+      if (session.userId !== decoded.id) {
+        console.warn('[SECURITY] jti userId não bate com token decoded.id.');
+        return res.status(401).json({ error: 'Sessão inválida.' });
+      }
+      req.session = session;
+    }
+    // (else: legacy token sem jti — segue sem req.session)
 
     // Validar existência do usuário no banco
     // (protege contra tokens válidos de usuários deletados)
