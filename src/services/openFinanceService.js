@@ -303,8 +303,26 @@ async function checkConsentExpiry() {
 
 // ─── Import to FinMind transactions ───────────────────────────
 
+// [GATE-1/OF-023] Sentinela TIPADA da corrida perdida (não usar match de string).
+// O $transaction re-lança o MESMO objeto de erro do callback, então `instanceof`
+// sobrevive ao rollback e distingue "perdeu a corrida" de erro real.
+class AlreadyImported extends Error {
+  constructor(btxId) {
+    super('BankTransaction já importada (corrida perdida)');
+    this.name = 'AlreadyImported';
+    this.btxId = btxId;
+  }
+}
+
 /**
  * Imports selected BankTransactions into the user's Transaction table.
+ *
+ * [GATE-1/OF-023] ATÔMICO (elimina OFC-6 TOCTOU). Cada item roda em seu próprio
+ * $transaction: cria a Transaction e RECLAMA o BankTransaction via updateMany
+ * condicional (WHERE importedTxId:null). O updateMany é o guard de corrida —
+ * apenas UM import concorrente casa o null e o flipa; o perdedor recebe count===0,
+ * lança AlreadyImported e o $transaction REVERTE o create (sem Transaction órfã).
+ * O loop por-item preserva a semântica de sucesso parcial do código original.
  */
 async function importTransactions(userId, bankTxIds) {
   const bankTxs = await prisma.bankTransaction.findMany({
@@ -317,21 +335,34 @@ async function importTransactions(userId, bankTxIds) {
 
   const created = [];
   for (const btx of bankTxs) {
-    const tx = await prisma.transaction.create({
-      data: {
-        userId,
-        type:        btx.amount >= 0 ? 'income' : 'expense',
-        category:    btx.finmindCategory ?? 'other',
-        amount:      Math.abs(btx.amount),
-        date:        btx.date,
-        description: btx.description,
-      },
-    });
-    await prisma.bankTransaction.update({
-      where: { id: btx.id },
-      data:  { importedTxId: tx.id },
-    });
-    created.push(tx.id);
+    try {
+      const txId = await prisma.$transaction(async (db) => {
+        const tx = await db.transaction.create({
+          data: {
+            userId,
+            type:        btx.amount >= 0 ? 'income' : 'expense',
+            category:    btx.finmindCategory ?? 'other',
+            amount:      Math.abs(btx.amount),
+            date:        btx.date,
+            description: btx.description,
+          },
+        });
+        // Claim atômico: só casa se AINDA estiver não-importada.
+        const claim = await db.bankTransaction.updateMany({
+          where: { id: btx.id, userId, importedTxId: null },
+          data:  { importedTxId: tx.id },
+        });
+        if (claim.count === 0) {
+          // Perdeu a corrida — lança para REVERTER o create acima (sem órfã).
+          throw new AlreadyImported(btx.id);
+        }
+        return tx.id;
+      });
+      created.push(txId);
+    } catch (err) {
+      if (err instanceof AlreadyImported) continue; // corrida perdida → pular item
+      throw err;                                    // erro real → propaga
+    }
   }
 
   return created;

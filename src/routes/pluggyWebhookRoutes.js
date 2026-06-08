@@ -5,12 +5,17 @@ const crypto  = require('crypto');
 const prisma  = require('../../prisma/client');
 const { hmac } = require('../services/encryption');
 const { syncConnection } = require('../services/openFinanceService');
+// [GATE-1/OF-022] Observabilidade do fluxo de webhook OF
+const { captureException } = require('../lib/sentry');
 
 const router = express.Router();
 
 function verifySignature(rawBody, signature) {
   const secret = process.env.PLUGGY_WEBHOOK_SECRET;
-  if (!secret) return true; // Skip in dev if secret not set
+  // [GATE-1/OF-020] FAIL-CLOSED: sem secret, REJEITAR (nunca aceitar sem validação).
+  // Defesa em profundidade — OF-021 garante que o boot exige PLUGGY_WEBHOOK_SECRET,
+  // então em produção o secret sempre existe; aqui protegemos contra env limpa em runtime.
+  if (!secret) return false;
 
   const expected = crypto
     .createHmac('sha256', secret)
@@ -72,6 +77,9 @@ router.post('/webhooks/pluggy', express.raw({ type: 'application/json' }), async
     }
   } catch (err) {
     console.error('[PLUGGY_WEBHOOK] Erro ao processar evento:', err.message);
+    // [GATE-1/OF-022] Captura no Sentry (no-op se DSN ausente) — falhas de sync
+    // do webhook eram invisíveis (só console.error).
+    captureException(err, { tags: { source: 'pluggy_webhook', eventType: event?.event } });
   }
 });
 

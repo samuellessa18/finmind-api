@@ -30,6 +30,15 @@ const REQUIRED_ENV = [
   'GOOGLE_CLIENT_ID_WEB',
   'GOOGLE_CLIENT_SECRET',
   'GOOGLE_CALLBACK_URL',
+  // [GATE-1/OF-021] Open Finance (Pluggy) — fail-fast no boot.
+  // Sem estas o OF falha tardiamente em runtime: API Pluggy (CLIENT_ID/SECRET),
+  // cifra de pluggyItemId (ENCRYPTION_KEY), webhook fail-closed rejeitando tudo
+  // (WEBHOOK_SECRET) e registro de webhook (WEBHOOK_URL).
+  'PLUGGY_CLIENT_ID',
+  'PLUGGY_CLIENT_SECRET',
+  'PLUGGY_WEBHOOK_SECRET',
+  'PLUGGY_WEBHOOK_URL',
+  'ENCRYPTION_KEY',
 ];
 
 const PLACEHOLDER_PATTERNS = [
