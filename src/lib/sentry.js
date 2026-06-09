@@ -14,7 +14,10 @@
 const Sentry = require('@sentry/node');
 const crypto = require('crypto');
 
-const PII_FIELDS = ['email', 'password', 'name', 'phone', 'cpf', 'ip', 'token', 'jwt', 'authorization'];
+const PII_FIELDS = ['email', 'password', 'name', 'phone', 'cpf', 'ip', 'token', 'jwt', 'authorization',
+  // [GATE-1/B5] Identificadores Pluggy/financeiros quando aparecem como CHAVE em objetos
+  // (request.data, extra, contexts, tags). URLs com esses ids são tratadas por redactUrl.
+  'itemid', 'accountid', 'pluggyitemid', 'pluggyaccountid', 'transactionid', 'pluggytxid'];
 
 let initialized = false;
 
@@ -48,6 +51,49 @@ function scrub(obj, depth = 0) {
   return out;
 }
 
+// [GATE-1/B5] Redige URLs antes de enviar ao Sentry. Descarta a query inteira
+// (pode conter itemId/accountId/from/to) e mascara segmentos de path que parecem
+// identificadores (UUID, cuid, hex/numérico longo). Ex.: /items/<itemId>,
+// /accounts?itemId=<id>. Mantém origin + nomes de rota para observabilidade.
+function redactUrl(u) {
+  if (typeof u !== 'string' || !u) return u;
+  try {
+    const url = new URL(u);
+    const path = url.pathname.split('/').map((seg) => {
+      if (!seg) return seg;
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return ':id'; // uuid
+      if (/^c[a-z0-9]{20,}$/i.test(seg)) return ':id'; // cuid (ids internos)
+      if (seg.length >= 16) return ':id';              // token/id longo
+      if (/^\d{6,}$/.test(seg)) return ':id';          // numérico longo
+      return seg;
+    }).join('/');
+    return url.origin + path + (url.search ? '?[redacted]' : '');
+  } catch {
+    return String(u).split('?')[0]; // não-parseável: ao menos descarta a query
+  }
+}
+
+// [GATE-1/B5] Redige RECURSIVAMENTE campos de URL em breadcrumb.data. O integration Http
+// do Sentry guarda a URL de saída em data.url E/OU data.http.{url,query,fragment} — qualquer
+// um pode conter itemId/accountId. url/href passam por redactUrl; query/fragment são descartados.
+function redactBreadcrumbData(d, depth) {
+  depth = depth || 0;
+  if (depth > 5 || !d || typeof d !== 'object') return d;
+  for (const k of Object.keys(d)) {
+    // Normaliza pelo último segmento p/ tratar tanto chaves aninhadas ({http:{query}})
+    // quanto chaves PLANAS com ponto ("http.query", "http.url") usadas pelo integration Http.
+    const seg = k.toLowerCase().split('.').pop();
+    const v = d[k];
+    if (typeof v === 'string') {
+      if (seg === 'url' || seg === 'href') d[k] = redactUrl(v);
+      else if (seg === 'query' || seg === 'search' || seg === 'fragment' || seg === 'hash') { if (v) d[k] = '[redacted]'; }
+    } else if (v && typeof v === 'object') {
+      redactBreadcrumbData(v, depth + 1);
+    }
+  }
+  return d;
+}
+
 function beforeSend(event) {
   try {
     // Request: limpar headers sensíveis e cookies
@@ -67,6 +113,8 @@ function beforeSend(event) {
       if (event.request.data && typeof event.request.data === 'object') {
         event.request.data = scrub(event.request.data);
       }
+      // [GATE-1/B5] Redige a URL da requisição (path pode conter ids; query pode conter itemId)
+      if (typeof event.request.url === 'string') event.request.url = redactUrl(event.request.url);
     }
     // User: nunca enviar email/ip, só id hashed (já feito ao chamar setUser)
     if (event.user) {
@@ -81,6 +129,12 @@ function beforeSend(event) {
     if (event.tags && event.tags.userId) {
       event.tags.userId = hashUserId(event.tags.userId);
     }
+    // [GATE-1/B5] Redige tags cujo NOME é campo sensível/identificador
+    if (event.tags) {
+      for (const k of Object.keys(event.tags)) {
+        if (PII_FIELDS.includes(k.toLowerCase())) event.tags[k] = '[scrubbed]';
+      }
+    }
   } catch {
     // Nunca falhar dentro de beforeSend
   }
@@ -89,7 +143,12 @@ function beforeSend(event) {
 
 function beforeBreadcrumb(breadcrumb) {
   try {
-    if (breadcrumb.data) breadcrumb.data = scrub(breadcrumb.data);
+    if (breadcrumb.data) {
+      breadcrumb.data = scrub(breadcrumb.data);
+      // [GATE-1/B5] Redige campos de URL do breadcrumb HTTP (data.url e data.http.{url,query,fragment});
+      // é onde o integration Http guarda a URL de saída Pluggy (com itemId/accountId).
+      redactBreadcrumbData(breadcrumb.data);
+    }
     // Console breadcrumbs podem ter mensagens com PII — truncar
     if (breadcrumb.category === 'console' && breadcrumb.message && breadcrumb.message.length > 500) {
       breadcrumb.message = breadcrumb.message.slice(0, 500) + '…';
@@ -183,5 +242,5 @@ module.exports = {
   // Re-export para middlewares Express
   Handlers: Sentry.Handlers,
   // Util exposed para testes
-  _internal: { hashUserId, anonymizeIP, scrub },
+  _internal: { hashUserId, anonymizeIP, scrub, redactUrl, redactBreadcrumbData, beforeSend, beforeBreadcrumb },
 };
