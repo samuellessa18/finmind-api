@@ -31,6 +31,11 @@ function verifySignature(rawBody, signature) {
 // POST /webhooks/pluggy
 // Note: must be mounted BEFORE express.json() so rawBody is preserved
 router.post('/webhooks/pluggy', express.raw({ type: 'application/json' }), async (req, res) => {
+  // [GATE-1/B1] Content-Type != application/json faz express.raw deixar req.body como {} (não-Buffer);
+  // crypto.update(não-Buffer) lançaria TypeError -> unhandledRejection -> process.exit(1) (DoS remoto).
+  if (!Buffer.isBuffer(req.body)) {
+    return res.status(400).json({ error: 'Payload inválido' });
+  }
   const signature = req.headers['x-pluggy-signature'] ?? '';
   if (!verifySignature(req.body, signature)) {
     console.warn('[PLUGGY_WEBHOOK] Assinatura inválida — ignorando');

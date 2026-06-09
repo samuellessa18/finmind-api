@@ -58,18 +58,35 @@ const PLACEHOLDER_PATTERNS = [
 
 const envErrors = [];
 
+// [GATE-1/B2] Chaves com validação ESTRUTURAL própria não passam pela heurística de
+// substring de placeholder (uma ENCRYPTION_KEY hexadecimal legítima pode conter "12345").
+const STRUCTURAL_KEYS = new Set(['ENCRYPTION_KEY']);
+
 for (const key of REQUIRED_ENV) {
   const val = process.env[key];
   if (!val || val.trim() === '') {
     envErrors.push(`  ✗ ${key}: ausente`);
     continue;
   }
+  if (STRUCTURAL_KEYS.has(key)) continue; // validado por formato abaixo, não por substring
   const isPlaceholder = PLACEHOLDER_PATTERNS.some(p =>
     val.toLowerCase().includes(p.toLowerCase())
   );
   if (isPlaceholder) {
     envErrors.push(`  ✗ ${key}: contém valor placeholder ("${val.slice(0, 30)}...")`);
   }
+}
+
+// [GATE-1/B2] Validação ESTRUTURAL — presença não basta para chave de cifra e URL de webhook.
+const encKey = (process.env.ENCRYPTION_KEY || '').trim();
+if (encKey && !/^[0-9a-fA-F]{64}$/.test(encKey)) {
+  envErrors.push('  ✗ ENCRYPTION_KEY: formato inválido (esperado 64 caracteres hexadecimais = 32 bytes)');
+}
+const webhookUrl = (process.env.PLUGGY_WEBHOOK_URL || '').trim();
+if (webhookUrl) {
+  let okUrl = false;
+  try { const u = new URL(webhookUrl); okUrl = (u.protocol === 'http:' || u.protocol === 'https:'); } catch { okUrl = false; }
+  if (!okUrl) envErrors.push('  ✗ PLUGGY_WEBHOOK_URL: URL inválida (esperado http(s)://...)');
 }
 
 if (envErrors.length > 0) {
