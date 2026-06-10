@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "build": "npx prisma generate --schema=./prisma/schema.prisma && node scripts/prisma-baseline.js && npx prisma migrate deploy --schema=./prisma/schema.prisma",
+    "build": "npx prisma generate --schema=./prisma/schema.prisma && npx prisma migrate deploy --schema=./prisma/schema.prisma",
     "validate": "node scripts/validate.js",
     "check": "node scripts/validate.js",
     "audit:high": "npm audit --audit-level=high"
