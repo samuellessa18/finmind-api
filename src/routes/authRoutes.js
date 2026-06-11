@@ -167,6 +167,15 @@ router.post('/auth/register', async (req, res, next) => {
 
     return res.status(201).json({ user: safeUser(user), token });
   } catch (error) {
+    // [DIAG-TEMP] Revela a exceção real do cadastro (errorHandler oculta stack/code
+    // em produção). Remover após diagnóstico.
+    console.error('[REGISTER ERROR]', {
+      name:    error?.name,
+      code:    error?.code,
+      message: error?.message,
+      meta:    error?.meta,
+      stack:   error?.stack,
+    });
     await trackTelemetry(null, 'auth_failed', {
       provider: 'local', type: 'register', reason: 'server_error',
     });
