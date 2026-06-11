@@ -883,6 +883,55 @@ v1Router.get('/users/profile', authenticateToken, lightCache(30), async (req, re
   }
 });
 
+// --- Onboarding (rota faltante chamada pelo frontend web) ---
+// O frontend (Onboarding.tsx) envia { monthlyIncome, goal: { title,
+// targetAmount, deadline } } e o PrivateRoute só libera o app quando
+// onboardingCompleted=true. $transaction: sem meta órfã se o update
+// falhar (e vice-versa).
+v1Router.post('/onboarding', authenticateToken, async (req, res, next) => {
+  try {
+    const result = parseRequest(onboardingSchema, req.body);
+    if (!result.success)
+      return res.status(400).json({ error: result.errors.join(', ') });
+
+    // onboardingSchema valida deadline apenas como string — barrar data
+    // não-parseável aqui (mesma mensagem do goalSchema) em vez de 500 no Prisma.
+    const deadline = new Date(result.data.goal.deadline);
+    if (Number.isNaN(deadline.getTime()))
+      return res.status(400).json({ error: 'Data inválida' });
+
+    const [user, goal] = await prisma.$transaction([
+      prisma.user.update({
+        where: { id: req.user.id },
+        data:  { monthlyIncome: result.data.monthlyIncome, onboardingCompleted: true },
+        select: {
+          id: true, name: true, email: true, avatarUrl: true,
+          monthlyIncome: true, streakDays: true, xp: true, level: true,
+          isPremium: true, plan: true, onboardingCompleted: true,
+          lastCheckIn: true, createdAt: true, provider: true,
+        },
+      }),
+      prisma.goal.create({
+        data: {
+          title:        result.data.goal.title,
+          targetAmount: result.data.goal.targetAmount,
+          deadline,
+          userId:       req.user.id,
+        },
+      }),
+    ]);
+
+    // Igual ao /ads/unlock-ai [FIX F-1]: sem invalidar, o lightCache(30) de
+    // /users/profile serviria onboardingCompleted=false por até 30s e o
+    // PrivateRoute devolveria o usuário ao /onboarding recém-concluído.
+    lightCache.invalidate(`${req.user.id}:/api/v1/users/profile`);
+
+    return res.json({ success: true, user, goal });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // --- Check-in diário (rota faltante chamada pelo mobile) ---
 v1Router.post('/checkin', authenticateToken, async (req, res, next) => {
   try {
