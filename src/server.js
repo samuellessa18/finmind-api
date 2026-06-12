@@ -474,6 +474,7 @@ v1Router.delete('/user/reset', authenticateToken, async (req, res, next) => {
       where: { id: userId },
       data:  { xp: 0, level: 1, streakDays: 0, lastCheckIn: null },
     });
+    lightCache.invalidate(`${userId}:/api/v1/finance/summary`);
     res.json({ message: 'Dados resetados com sucesso.' });
   } catch (error) {
     next(error);
@@ -515,6 +516,9 @@ v1Router.post('/transactions', authenticateToken, async (req, res, next) => {
     const transaction = await prisma.transaction.create({
       data: { ...txData, date, userId: req.user.id },
     });
+    // Sem invalidar, o lightCache(60) de /finance/summary serviria o resumo
+    // antigo por até 60s após a mutação (mesmo padrão FIX F-1 do profile).
+    lightCache.invalidate(`${req.user.id}:/api/v1/finance/summary`);
     res.json(transaction);
   } catch (error) {
     next(error);
@@ -526,6 +530,7 @@ v1Router.delete('/transactions/:id', authenticateToken, async (req, res, next) =
     await prisma.transaction.deleteMany({
       where: { id: req.params.id, ...tenantWhere(req.user) },
     });
+    lightCache.invalidate(`${req.user.id}:/api/v1/finance/summary`);
     res.json({ success: true });
   } catch (error) {
     next(error);
@@ -582,6 +587,7 @@ v1Router.post('/goals', authenticateToken, async (req, res, next) => {
         userId:   req.user.id,
       },
     });
+    lightCache.invalidate(`${req.user.id}:/api/v1/finance/summary`);
     res.json(goal);
   } catch (error) {
     next(error);
@@ -907,6 +913,7 @@ v1Router.post('/onboarding', authenticateToken, async (req, res, next) => {
     // /users/profile serviria onboardingCompleted=false por até 30s e o
     // PrivateRoute devolveria o usuário ao /onboarding recém-concluído.
     lightCache.invalidate(`${req.user.id}:/api/v1/users/profile`);
+    lightCache.invalidate(`${req.user.id}:/api/v1/finance/summary`);
 
     return res.json({ success: true, user, goal });
   } catch (error) {
