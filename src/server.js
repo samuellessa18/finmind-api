@@ -334,6 +334,21 @@ const loginSchema = z.object({
   password: z.string().min(6),
 });
 
+// [CATEGORIAS] Listas padronizadas (pt-BR). Validação ESTRITA por tipo:
+// categoria fora da lista → 400 (sem mapeamento automático para "Outros").
+const EXPENSE_CATEGORIES = [
+  'Alimentação', 'Moradia', 'Transporte', 'Saúde', 'Educação', 'Lazer',
+  'Compras', 'Assinaturas', 'Contas', 'Impostos', 'Seguros', 'Pets',
+  'Viagens', 'Investimentos', 'Presentes', 'Doações', 'Cuidados Pessoais',
+  'Vestuário', 'Tecnologia', 'Trabalho', 'Empréstimos',
+  'Família', 'Emergências', 'Outros',
+];
+const INCOME_CATEGORIES = [
+  'Salário', 'Freelance', 'Comissões', 'Investimentos', 'Aluguel',
+  'Reembolsos', 'Prêmios', 'Vendas', 'Benefícios', 'Outros',
+];
+const CATEGORIES_BY_TYPE = { expense: EXPENSE_CATEGORIES, income: INCOME_CATEGORIES };
+
 const transactionSchema = z.object({
   type:           z.enum(['income', 'expense']),
   category:       z.string().min(1),
@@ -341,6 +356,38 @@ const transactionSchema = z.object({
   date:           z.string().optional(),
   description:    z.string().optional(),
   confirmWarning: z.boolean().optional(),
+}).superRefine((data, ctx) => {
+  if (!CATEGORIES_BY_TYPE[data.type]?.includes(data.category)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['category'],
+      message: `Categoria inválida para ${data.type === 'income' ? 'receita' : 'despesa'}.`,
+    });
+  }
+});
+
+// [PARCELAS] Compra parcelada: o backend calcula o valor da parcela
+// (nunca solicitado ao usuário) e cria N Transactions reais (datas mensais).
+const installmentSchema = z.object({
+  description:  z.string().min(1).max(140),
+  category:     z.string().min(1),
+  totalAmount:  z.number().positive(),
+  installments: z.number().int().min(2).max(60),
+}).superRefine((data, ctx) => {
+  if (!EXPENSE_CATEGORIES.includes(data.category)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['category'],
+      message: 'Categoria inválida para despesa.',
+    });
+  }
+  if (Math.floor((data.totalAmount / data.installments) * 100) < 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['installments'],
+      message: 'Valor da parcela ficaria abaixo de R$ 0,01.',
+    });
+  }
 });
 
 // [FASE 3.2] Schema para tracking de transação não concretizada após aviso.
@@ -405,6 +452,18 @@ function startOfDay(date) {
 
 function dayDifference(dateA, dateB) {
   return Math.round((startOfDay(dateA) - startOfDay(dateB)) / (1000 * 60 * 60 * 24));
+}
+
+// Soma meses preservando o dia, com clamp no fim do mês destino
+// (ex.: 31/jan + 1 mês = 28/fev; 31/mar + 1 mês = 30/abr).
+function addMonthsClamped(date, months) {
+  const d = new Date(date);
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + months);
+  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(day, lastDay));
+  return d;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -532,6 +591,59 @@ v1Router.delete('/transactions/:id', authenticateToken, async (req, res, next) =
     });
     lightCache.invalidate(`${req.user.id}:/api/v1/finance/summary`);
     res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Compra parcelada: cria N Transactions reais (parcela 1 = hoje; demais +1 mês,
+// com clamp de fim de mês). Centavos exatos: N-1 parcelas arredondadas para
+// baixo e a ÚLTIMA fecha a soma (100/3 → 33,33 + 33,33 + 33,34).
+v1Router.post('/transactions/installments', authenticateToken, async (req, res, next) => {
+  try {
+    const result = parseRequest(installmentSchema, {
+      ...req.body,
+      totalAmount:  Number(req.body.totalAmount),
+      installments: Number(req.body.installments),
+    });
+    if (!result.success)
+      return res.status(400).json({ error: result.errors.join(', ') });
+
+    const { description, category, totalAmount, installments } = result.data;
+
+    const baseAmount = Math.floor((totalAmount / installments) * 100) / 100;
+    const lastAmount = Math.round((totalAmount - baseAmount * (installments - 1)) * 100) / 100;
+
+    const groupId   = crypto.randomUUID();
+    const firstDate = new Date();
+
+    const created = await prisma.$transaction(
+      Array.from({ length: installments }, (_, i) =>
+        prisma.transaction.create({
+          data: {
+            userId:             req.user.id,
+            type:               'expense',
+            category,
+            description,
+            amount:             i === installments - 1 ? lastAmount : baseAmount,
+            date:               addMonthsClamped(firstDate, i),
+            installmentGroupId: groupId,
+            installmentNumber:  i + 1,
+            installmentCount:   installments,
+          },
+        })
+      )
+    );
+
+    lightCache.invalidate(`${req.user.id}:/api/v1/finance/summary`);
+    return res.json({
+      success: true,
+      groupId,
+      installmentAmount: baseAmount,
+      lastInstallmentAmount: lastAmount,
+      count: created.length,
+      transactions: created,
+    });
   } catch (error) {
     next(error);
   }

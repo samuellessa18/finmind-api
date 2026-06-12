@@ -75,8 +75,10 @@ async function getGeneralSummary(userId) {
     const ninetyDaysAgo = new Date();
     ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
 
+    // [PARCELAS] Teto em "agora": o resumo reflete apenas o REALIZADO —
+    // parcelas futuras (datas à frente) não inflam o resumo do mês da compra.
     const transactions = await prisma.transaction.findMany({
-        where: { userId, date: { gte: ninetyDaysAgo } },
+        where: { userId, date: { gte: ninetyDaysAgo, lte: new Date() } },
         orderBy: { date: 'desc' },
     });
 
