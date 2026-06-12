@@ -82,11 +82,18 @@ model Transaction {
   date        DateTime
   description String?
 
+  // Compras parceladas: cada parcela é uma Transaction real (datas futuras).
+  // Nullable = transações comuns/antigas não são afetadas.
+  installmentGroupId String? // agrupa as N parcelas de uma mesma compra
+  installmentNumber  Int? // 1..N
+  installmentCount   Int? // N
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId]) // Todas as queries de transação filtram por userId
   @@index([userId, date]) // Queries de resumo mensal
   @@index([userId, type]) // Filtros por tipo (receita/despesa)
+  @@index([userId, installmentGroupId]) // Agrupar/listar parcelas de uma compra
 }
 
 model Goal {
