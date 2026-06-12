@@ -494,18 +494,26 @@ v1Router.get('/transactions', authenticateToken, async (req, res, next) => {
 
 v1Router.post('/transactions', authenticateToken, async (req, res, next) => {
   try {
-    const payload = {
+    // [FIX] Validar o body CRU (date como string — contrato do schema e dos
+    // clientes web/mobile) ANTES de converter. A conversão pré-validação fazia
+    // z.string() receber um Date e a rota rejeitava 100% dos inputs com
+    // "Expected string, received date".
+    const result = parseRequest(transactionSchema, {
       ...req.body,
       amount: Number(req.body.amount),
-      date:   req.body.date ? new Date(req.body.date) : new Date(),
-    };
-    const result = parseRequest(transactionSchema, payload);
+    });
     if (!result.success)
       return res.status(400).json({ error: result.errors.join(', ') });
 
+    // Converte a data DEPOIS do parse (Prisma espera DateTime); barra string
+    // não-parseável (mesma mensagem do goalSchema) em vez de 500 no Prisma.
+    const date = result.data.date ? new Date(result.data.date) : new Date();
+    if (Number.isNaN(date.getTime()))
+      return res.status(400).json({ error: 'Data inválida' });
+
     const { confirmWarning, ...txData } = result.data;
     const transaction = await prisma.transaction.create({
-      data: { ...txData, userId: req.user.id },
+      data: { ...txData, date, userId: req.user.id },
     });
     res.json(transaction);
   } catch (error) {
