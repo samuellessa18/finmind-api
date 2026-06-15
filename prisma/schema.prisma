@@ -38,6 +38,7 @@ model User {
   level               Int       @default(1)
   isPremium           Boolean   @default(false)
   plan                String    @default("free") // "free" | "pro"
+  role                String    @default("user") // "user" | "admin" | "super_admin" — RBAC do painel admin
   onboardingCompleted Boolean   @default(false)
   lastCheckIn         DateTime?
   createdAt           DateTime  @default(now())
@@ -64,6 +65,23 @@ model User {
   @@index([email]) // Busca por email no login
   @@index([googleId]) // Busca no OAuth Google
   @@index([createdAt]) // Métricas de admin segmentadas por data
+}
+
+// [ADMIN] Trilha de auditoria de ações do painel administrativo.
+// adminId/targetUserId são String (não-FK de propósito) para que o registro
+// SOBREVIVA à exclusão do usuário-alvo. before/after = snapshot JSON do estado.
+model AdminAudit {
+  id           String   @id @default(cuid())
+  adminId      String
+  targetUserId String
+  action       String // "update_plan" | "update_role" | "update_premium" | "delete_user"
+  before       Json?
+  after        Json?
+  createdAt    DateTime @default(now())
+
+  @@index([targetUserId])
+  @@index([adminId])
+  @@index([createdAt])
 }
 
 model Environment {
