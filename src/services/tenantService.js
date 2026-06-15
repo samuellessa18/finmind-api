@@ -13,6 +13,7 @@ async function loadUserById(userId) {
       xp: true,
       level: true,
       plan: true,
+      role: true, // [ADMIN/RBAC] necessário para requireAdmin/requireSuperAdmin
       aiUnlockedUntil: true  // [FASE 3.4] necessário para canUseAI() em rotas de IA
     }
   });

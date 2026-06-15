@@ -134,6 +134,7 @@ const { runGrowthEngine }                     = require('./services/growthEngine
 
 const financeRoutes       = require('./routes/financeRoutes');
 const adminRoutes         = require('./routes/adminRoutes');
+const adminUserRoutes     = require('./routes/adminUserRoutes'); // [ADMIN] painel de usuários (RBAC por role)
 const growthRoutes        = require('./routes/growthRoutes');
 const authRoutes          = require('./routes/authRoutes');
 const openFinanceRoutes   = require('./routes/openFinanceRoutes');
@@ -499,6 +500,7 @@ const v1Router = express.Router();
 
 v1Router.use('/finance',       financeRoutes);
 v1Router.use('/admin',         adminRoutes);
+v1Router.use('/admin',         adminUserRoutes); // [ADMIN] /admin/users* (RBAC por role)
 v1Router.use('/growth',        growthRoutes);
 v1Router.use('/open-finance',  openFinanceRoutes);
 
@@ -989,7 +991,7 @@ v1Router.get('/users/profile', authenticateToken, lightCache(30), async (req, re
       select: {
         id: true, name: true, email: true, avatarUrl: true,
         monthlyIncome: true, streakDays: true, xp: true, level: true,
-        isPremium: true, plan: true, onboardingCompleted: true,
+        isPremium: true, plan: true, role: true, onboardingCompleted: true,
         lastCheckIn: true, createdAt: true, provider: true,
         aiUnlockedUntil: true, // [FASE 3.4] usado para derivar campos — não exposto
       },
