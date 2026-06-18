@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const prisma = require('../../prisma/client');
-const { calculateSummary, detectCategorySuggestions } = require('../engine/financialEngine');
+const { calculateSummary, detectCategorySuggestions, scoreFromUserData } = require('../engine/financialEngine');
 const { getEmotionalAnalyticsSummary } = require('../analytics/behaviorMetrics');
 // [FASE 5] Substituído coachEngine.generateDailyCoach por insightGenerator.
 // Motivo: coachEngine espera shape de summary incompatível com calculateSummary
@@ -38,6 +38,8 @@ async function runDailyAnalysis() {
         const goals = await prisma.goal.findMany({ where: { userId: user.id } });
 
         const summary = calculateSummary(user, transactions, goals);
+        // [SCORE] Score determinístico (janela 90d) — grava histórico no snapshot.
+        const scoreResult = scoreFromUserData(user, transactions, goals);
         const behaviorSummary = await getEmotionalAnalyticsSummary(user.id);
 
         // [FASE 5] Correção B1/B2: campos do summary têm nomes diferentes
@@ -52,7 +54,9 @@ async function runDailyAnalysis() {
             monthlyExpenses: summary.totalExpenses,
             savingsRate: summary.savingsRate,
             riskLevel: summary.riskLevel,
-            predictedExpenses: summary.projectedExpenses
+            predictedExpenses: summary.projectedExpenses,
+            score: scoreResult.score,
+            scoreBreakdown: scoreResult.breakdown
           }
         });
 

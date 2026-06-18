@@ -149,6 +149,8 @@ model DailySnapshot {
   savingsRate       Float
   riskLevel         String
   predictedExpenses Float
+  score             Int?     // [SCORE] Score financeiro 0–100 (histórico p/ evolução)
+  scoreBreakdown    Json?    // [SCORE] sub-notas + pesos aplicados (transparência/explicação)
   createdAt         DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
