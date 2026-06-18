@@ -104,11 +104,62 @@ function calculateSummary(user, transactions, goals) {
     };
 }
 
-function detectCategorySuggestions(transactions) {
-    // Simplified logic for pattern detection
-    return {
-        suggestions: []
-    };
+/**
+ * FUNÇÃO PURA. Detecção de padrões de gasto por categoria (FASE 3 MVP):
+ * compara o gasto do MÊS-CALENDÁRIO corrente com o do mês anterior — APENAS despesas.
+ * Regras: ignora receitas; ignora categoria sem histórico no mês anterior; ignora mês
+ * anterior = 0 (evita divisão por zero); ignora gasto atual < R$ 50 (anti-ruído).
+ * Severidade: crescimento > 30% → 'high'; 15%–30% → 'medium'; < 15% → sem sugestão.
+ * NÃO altera a janela do score/summary/orçamento — a limitação temporal vive AQUI
+ * (buckets de mês-calendário), operando sobre o array compartilhado já carregado.
+ * @param {Array} transactions  todas as transações do usuário (filtra internamente)
+ * @param {Date}  now           referência (injetável p/ testes)
+ * @returns {{ suggestions: Array<{category:string, percentage:number, severity:string, recommendation:string}> }}
+ */
+function detectCategorySuggestions(transactions, now = new Date()) {
+    const FLOOR = 50; // gasto atual mínimo na categoria p/ considerar
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    // Mês anterior: month-1 normaliza a virada de ano (janeiro → dezembro do ano anterior).
+    const prevRef = new Date(year, month - 1, 1);
+    const prevYear = prevRef.getFullYear();
+    const prevMonth = prevRef.getMonth();
+
+    const curr = {};
+    const prev = {};
+    for (const t of transactions || []) {
+        if (t.type !== 'expense') continue; // ignora receitas
+        const d = new Date(t.date);
+        const dy = d.getFullYear();
+        const dm = d.getMonth();
+        if (dy === year && dm === month) {
+            curr[t.category] = (curr[t.category] || 0) + t.amount;
+        } else if (dy === prevYear && dm === prevMonth) {
+            prev[t.category] = (prev[t.category] || 0) + t.amount;
+        }
+    }
+
+    const suggestions = [];
+    for (const category of Object.keys(curr)) {
+        const c = curr[category];
+        if (c < FLOOR) continue;            // gasto atual < R$ 50
+        if (!(category in prev)) continue;  // categoria sem histórico no mês anterior (nova)
+        const p = prev[category];
+        if (p === 0) continue;              // mês anterior = 0 → evita divisão por zero
+        const growth = ((c - p) / p) * 100;
+        let severity;
+        if (growth > 30) severity = 'high';
+        else if (growth >= 15) severity = 'medium';
+        else continue;                      // crescimento < 15% → sem alerta
+        const percentage = Math.round(growth);
+        suggestions.push({
+            category,
+            percentage,
+            severity,
+            recommendation: `Gastos em ${category} subiram ${percentage}% vs o mês passado (R$ ${c.toFixed(2)} vs R$ ${p.toFixed(2)}). Vale revisar.`,
+        });
+    }
+    return { suggestions };
 }
 
 // ─────────────────────────────────────────────────────────────
