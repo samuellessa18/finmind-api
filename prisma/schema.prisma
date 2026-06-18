@@ -61,10 +61,27 @@ model User {
   bankAccounts     BankAccount[]
   bankTransactions BankTransaction[]
   sessions         Session[]
+  budgets          Budget[]
 
   @@index([email]) // Busca por email no login
   @@index([googleId]) // Busca no OAuth Google
   @@index([createdAt]) // Métricas de admin segmentadas por data
+}
+
+// [ORÇAMENTO] Limite mensal RECORRENTE por categoria de despesa.
+// Consumo NÃO é persistido — calculado ao vivo (mês corrente). 1 limite por categoria.
+model Budget {
+  id           String   @id @default(cuid())
+  userId       String
+  category     String // ∈ EXPENSE_CATEGORIES (validado no backend)
+  monthlyLimit Float
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, category])
+  @@index([userId])
 }
 
 // [ADMIN] Trilha de auditoria de ações do painel administrativo.
@@ -191,11 +208,16 @@ model PatternAlert {
   percentage Float
   message    String
   severity   String // "low" | "medium" | "high"
+  // [ORÇAMENTO] Origem do alerta. Discrimina a deduplicação: BUDGET e PATTERN
+  // para a MESMA categoria/mês coexistem sem se bloquear. default 'PATTERN'
+  // backfilla registros antigos (antes desta fase TODO PatternAlert era de padrão).
+  source     String   @default("PATTERN") // "PATTERN" | "BUDGET"
   detectedAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([userId, category, source]) // dedup por origem (+ filtro detectedAt no mês)
 }
 
 model Event {

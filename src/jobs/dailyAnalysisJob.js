@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const prisma = require('../../prisma/client');
-const { calculateSummary, detectCategorySuggestions, scoreFromUserData } = require('../engine/financialEngine');
+const { calculateSummary, detectCategorySuggestions, scoreFromUserData, computeBudgetConsumption } = require('../engine/financialEngine');
 const { getEmotionalAnalyticsSummary } = require('../analytics/behaviorMetrics');
 // [FASE 5] Substituído coachEngine.generateDailyCoach por insightGenerator.
 // Motivo: coachEngine espera shape de summary incompatível com calculateSummary
@@ -24,6 +24,23 @@ function startOfToday() {
   const now = new Date();
   now.setHours(0, 0, 0, 0);
   return now;
+}
+
+// [ORÇAMENTO] Cria um PatternAlert deduplicado por (userId, category, source)
+// DENTRO do mês corrente (mês de detectedAt). Como o dedup inclui `source`,
+// um alerta BUDGET e um PATTERN para a MESMA categoria/mês COEXISTEM sem se
+// bloquear. Idempotente dentro do mês. prismaClient é injetável (testes).
+// Retorna { created: boolean, alert }.
+async function upsertMonthlyAlert(prismaClient, { userId, category, source, percentage, message, severity }, now = new Date()) {
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const existing = await prismaClient.patternAlert.findFirst({
+    where: { userId, category, source, detectedAt: { gte: monthStart } },
+  });
+  if (existing) return { created: false, alert: existing };
+  const alert = await prismaClient.patternAlert.create({
+    data: { userId, category, source, percentage, message, severity },
+  });
+  return { created: true, alert };
 }
 
 async function runDailyAnalysis() {
@@ -101,7 +118,8 @@ async function runDailyAnalysis() {
         // [FASE 5] B5 fix: calculateSummary retorna 'HIGH' (uppercase EN),
         // não 'ALTO' (PT). Lógica: notificar somente quando RISCO subiu para HIGH.
         if (summary.riskLevel === 'HIGH' && (!lastSnapshot || lastSnapshot.riskLevel !== 'HIGH')) {
-          const preventionMessage = behaviorSummary.emotional.preventionMessage;
+          // [FIX hardening] translatePreventionRate retorna null (cancelRate < 10%) → || '' impede desreferência no .replace abaixo. Caminho não-nulo idêntico.
+          const preventionMessage = behaviorSummary.emotional.preventionMessage || '';
           notifications.push({
             userId: user.id,
             title: '⚠️ Atenção Necessária',
@@ -135,7 +153,8 @@ async function runDailyAnalysis() {
         // escopo desta fase (exigiria refactor do calculateSummary). Mantidos como
         // estão para preservar a lógica intencional quando o trend for ativado.
         if (summary.trend > 0.15 && summary.trendDirection === 'up') {
-          const engagementMessage = behaviorSummary.emotional.engagementMessage;
+          // [FIX hardening] translateSmartEngagement pode retornar null → || '' (bloco dormente hoje, mas defensivo p/ quando trend for ativado).
+          const engagementMessage = behaviorSummary.emotional.engagementMessage || '';
           notifications.push({
             userId: user.id,
             title: '📈 Gastos em Alta',
@@ -146,7 +165,8 @@ async function runDailyAnalysis() {
         }
 
         if (summary.trend < -0.15 && summary.trendDirection === 'down') {
-          const consistencyMessage = behaviorSummary.emotional.consistencyMessage;
+          // [FIX hardening] translateConsistency retorna null (streak < 1) → || '' (bloco dormente hoje, mas defensivo).
+          const consistencyMessage = behaviorSummary.emotional.consistencyMessage || '';
           notifications.push({
             userId: user.id,
             title: '📉 Progresso na Economia',
@@ -176,21 +196,17 @@ async function runDailyAnalysis() {
         const categoryAnalysis = detectCategorySuggestions(transactions);
         for (const suggestion of categoryAnalysis.suggestions) {
           if (suggestion.severity === 'high') {
-            const existingAlert = await prisma.patternAlert.findFirst({
-              where: { userId: user.id, category: suggestion.category }
+            // Dedup por origem PATTERN + mês corrente (não colide com alertas BUDGET).
+            const { created } = await upsertMonthlyAlert(prisma, {
+              userId: user.id,
+              category: suggestion.category,
+              source: 'PATTERN',
+              percentage: suggestion.percentage,
+              message: suggestion.recommendation,
+              severity: suggestion.severity,
             });
 
-            if (!existingAlert) {
-              await prisma.patternAlert.create({
-                data: {
-                  userId: user.id,
-                  category: suggestion.category,
-                  percentage: suggestion.percentage,
-                  message: suggestion.recommendation,
-                  severity: suggestion.severity
-                }
-              });
-
+            if (created) {
               notifications.push({
                 userId: user.id,
                 title: `⚠️ ${suggestion.category} Acima do Ideal`,
@@ -215,8 +231,12 @@ async function runDailyAnalysis() {
           });
 
           if (!todayReminder) {
+            // [FIX] consistencyMessage é null quando averageStreak < 1 (translateConsistency
+            // retorna null). Sem este guard, .includes/.replace estouravam e abortavam o
+            // processamento do usuário ANTES do bloco de orçamento. null → ramo "começar
+            // hoje" (mensagem de iniciante, intenção original do ramo verdadeiro).
             const consistencyMessage = behaviorSummary.emotional.consistencyMessage;
-            const message = consistencyMessage.includes('comece hoje')
+            const message = (!consistencyMessage || consistencyMessage.includes('comece hoje'))
               ? 'Que tal começar hoje criando o hábito do check-in diário?'
               : `${consistencyMessage.replace('🔥 ', '')} — mantenha o ritmo com seu check-in diário.`;
             notifications.push({
@@ -225,6 +245,34 @@ async function runDailyAnalysis() {
               message,
               type: 'opportunity',
               priority: 'medium'
+            });
+          }
+        }
+
+        // [ORÇAMENTO] Alerta de estouro por categoria (≥80% ATENÇÃO / ≥100% EXCEDIDO/CRÍTICO).
+        // Dedup por origem BUDGET + mês corrente (via upsertMonthlyAlert): NÃO colide
+        // com alertas PATTERN da mesma categoria/mês.
+        const budgets = await prisma.budget.findMany({ where: { userId: user.id } });
+        if (budgets.length > 0) {
+          const consumption = computeBudgetConsumption(budgets, transactions, new Date());
+          for (const b of consumption) {
+            if (b.status === 'NORMAL') continue;
+            const severity = b.pct >= 100 ? 'high' : 'medium';
+            const { created } = await upsertMonthlyAlert(prisma, {
+              userId: user.id,
+              category: b.category,
+              source: 'BUDGET',
+              percentage: b.pct,
+              message: b.forecastMessage,
+              severity,
+            });
+            if (!created) continue;
+            notifications.push({
+              userId: user.id,
+              title: `${b.pct >= 100 ? '⛔' : '⚠️'} Orçamento de ${b.category} em ${b.status}`,
+              message: `R$ ${b.spent.toFixed(2)} de R$ ${b.monthlyLimit.toFixed(2)} (${b.pct}%). ${b.forecastMessage}`,
+              type: 'warning',
+              priority: severity === 'high' ? 'high' : 'medium',
             });
           }
         }
@@ -260,5 +308,6 @@ function startDailyAnalysisJob() {
 
 module.exports = {
   startDailyAnalysisJob,
-  runDailyAnalysis
+  runDailyAnalysis,
+  upsertMonthlyAlert
 };
