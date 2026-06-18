@@ -1,5 +1,5 @@
 const prisma = require('../../prisma/client');
-const { calculateProjections, calculateFinancialSummary, detectRisk } = require('../engine/financialEngine');
+const { calculateProjections, calculateFinancialSummary, detectRisk, scoreFromUserData, scoreMessage } = require('../engine/financialEngine');
 
 // prisma instance imported above
 
@@ -94,7 +94,48 @@ async function getGeneralSummary(userId) {
     };
 }
 
+// [SCORE] Score financeiro atual (determinístico) + evolução vs ~mês anterior.
+// Atual = calculado AO VIVO (janela 90d). Anterior = score do DailySnapshot
+// de ~30 dias atrás (history gravado pelo dailyAnalysisJob). Sem OpenAI.
+async function getFinancialScore(userId) {
+    const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, monthlyIncome: true },
+    });
+    if (!user) throw new Error('Usuário não encontrado');
+
+    const ninetyDaysAgo = new Date();
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+    const [transactions, goals] = await Promise.all([
+        prisma.transaction.findMany({ where: { userId, date: { gte: ninetyDaysAgo, lte: new Date() } } }),
+        prisma.goal.findMany({ where: { userId } }),
+    ]);
+
+    const current = scoreFromUserData(user, transactions, goals);
+
+    // Evolução: snapshot com score de ~30 dias atrás (o mais recente até lá).
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const prevSnap = await prisma.dailySnapshot.findFirst({
+        where: { userId, score: { not: null }, createdAt: { lte: thirtyDaysAgo } },
+        orderBy: { createdAt: 'desc' },
+        select: { score: true, createdAt: true },
+    });
+    const previousScore = prevSnap ? prevSnap.score : null;
+    const delta = previousScore === null ? null : current.score - previousScore;
+
+    return {
+        score: current.score,
+        band: current.band,
+        breakdown: current.breakdown,
+        previousScore,
+        delta,
+        message: scoreMessage(current.band, delta),
+    };
+}
+
 module.exports = {
     getDetailedChartData,
-    getGeneralSummary
+    getGeneralSummary,
+    getFinancialScore
 };
