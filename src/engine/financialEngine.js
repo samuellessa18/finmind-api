@@ -231,6 +231,86 @@ function scoreFromUserData(user, transactions, goals, now = new Date()) {
     return calculateScore({ summary, projections, goals, transactions: txn90, now });
 }
 
+// ─────────────────────────────────────────────────────────────
+// ORÇAMENTO POR CATEGORIA — consumo do mês corrente + previsão de
+// estouro, 100% determinístico (sem IA). Função PURA.
+// ─────────────────────────────────────────────────────────────
+const round2 = (n) => Math.round(n * 100) / 100;
+
+/**
+ * Status do orçamento por % consumido:
+ *   0–79 NORMAL | 80–99 ATENÇÃO | 100–119 EXCEDIDO | 120+ CRÍTICO
+ */
+function budgetStatus(pct) {
+    if (pct < 80) return 'NORMAL';
+    if (pct < 100) return 'ATENÇÃO';
+    if (pct < 120) return 'EXCEDIDO';
+    return 'CRÍTICO';
+}
+
+/**
+ * FUNÇÃO PURA. Consumo do MÊS-CALENDÁRIO corrente por categoria + previsão.
+ * @param {Array} budgets       [{ id?, category, monthlyLimit }]
+ * @param {Array} transactions  lançamentos (filtra internamente: despesa, mês corrente, até now)
+ * @param {Date}  now           referência (injetável p/ testes)
+ */
+function computeBudgetConsumption(budgets, transactions, now = new Date()) {
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const daysPassed = Math.min(now.getDate(), daysInMonth); // 1..daysInMonth
+    const daysRemaining = daysInMonth - daysPassed;
+
+    // Gasto por categoria: despesas do mês corrente, até a data de referência.
+    const spentByCat = {};
+    for (const t of transactions || []) {
+        if (t.type !== 'expense') continue;
+        const d = new Date(t.date);
+        if (d.getFullYear() === year && d.getMonth() === month && d <= now) {
+            spentByCat[t.category] = (spentByCat[t.category] || 0) + t.amount;
+        }
+    }
+
+    return (budgets || []).map((b) => {
+        const limit = b.monthlyLimit;
+        const spent = round2(spentByCat[b.category] || 0);
+        const pct = limit > 0 ? Math.round((spent / limit) * 100) : 0;
+        const status = budgetStatus(pct);
+
+        const avgDaily = daysPassed > 0 ? spent / daysPassed : 0;
+        const projected = round2(avgDaily * daysInMonth);
+
+        let daysToExceed = null;
+        let forecastMessage;
+        if (spent >= limit && limit > 0) {
+            forecastMessage = `Limite já ultrapassado: R$ ${spent.toFixed(2)} de R$ ${limit.toFixed(2)}.`;
+        } else if (avgDaily > 0 && projected > limit) {
+            // projected>limit ⇒ o ponto de estouro cai DENTRO do mês corrente.
+            daysToExceed = Math.max(1, Math.ceil((limit - spent) / avgDaily));
+            forecastMessage = `No ritmo atual, você ultrapassará o limite em ${daysToExceed} dia(s).`;
+        } else {
+            forecastMessage = `Mantendo o ritmo atual, você terminará o mês em R$ ${projected.toFixed(2)} de R$ ${limit.toFixed(2)}.`;
+        }
+
+        return {
+            id: b.id,
+            category: b.category,
+            monthlyLimit: round2(limit),
+            spent,
+            pct,
+            status,
+            forecast: {
+                avgDaily: round2(avgDaily),
+                projected,
+                daysRemaining,
+                daysToExceed,
+                willExceed: projected > limit || spent >= limit,
+            },
+            forecastMessage,
+        };
+    });
+}
+
 module.exports = {
     calculateFinancialSummary,
     calculateProjections,
@@ -241,4 +321,6 @@ module.exports = {
     scoreBand,
     scoreMessage,
     scoreFromUserData,
+    computeBudgetConsumption,
+    budgetStatus,
 };

@@ -109,6 +109,7 @@ const { runGrowthEngine }                     = require('./services/growthEngine
 const financeRoutes       = require('./routes/financeRoutes');
 const adminRoutes         = require('./routes/adminRoutes');
 const adminUserRoutes     = require('./routes/adminUserRoutes'); // [ADMIN] painel de usuários (RBAC por role)
+const budgetRoutes        = require('./routes/budgetRoutes'); // [ORÇAMENTO] limites por categoria
 const growthRoutes        = require('./routes/growthRoutes');
 const authRoutes          = require('./routes/authRoutes');
 const openFinanceRoutes   = require('./routes/openFinanceRoutes');
@@ -335,20 +336,9 @@ const loginSchema = z.object({
   password: z.string().min(6),
 });
 
-// [CATEGORIAS] Listas padronizadas (pt-BR). Validação ESTRITA por tipo:
-// categoria fora da lista → 400 (sem mapeamento automático para "Outros").
-const EXPENSE_CATEGORIES = [
-  'Alimentação', 'Moradia', 'Transporte', 'Saúde', 'Educação', 'Lazer',
-  'Compras', 'Assinaturas', 'Contas', 'Impostos', 'Seguros', 'Pets',
-  'Viagens', 'Investimentos', 'Presentes', 'Doações', 'Cuidados Pessoais',
-  'Vestuário', 'Tecnologia', 'Trabalho', 'Empréstimos',
-  'Família', 'Emergências', 'Outros',
-];
-const INCOME_CATEGORIES = [
-  'Salário', 'Freelance', 'Comissões', 'Investimentos', 'Aluguel',
-  'Reembolsos', 'Prêmios', 'Vendas', 'Benefícios', 'Outros',
-];
-const CATEGORIES_BY_TYPE = { expense: EXPENSE_CATEGORIES, income: INCOME_CATEGORIES };
+// [CATEGORIAS] Fonte única em ./constants/categories (compartilhada com budgetRoutes).
+// Validação ESTRITA por tipo: categoria fora da lista → 400.
+const { EXPENSE_CATEGORIES, CATEGORIES_BY_TYPE } = require('./constants/categories');
 
 const transactionSchema = z.object({
   type:           z.enum(['income', 'expense']),
@@ -475,6 +465,7 @@ const v1Router = express.Router();
 v1Router.use('/finance',       financeRoutes);
 v1Router.use('/admin',         adminRoutes);
 v1Router.use('/admin',         adminUserRoutes); // [ADMIN] /admin/users* (RBAC por role)
+v1Router.use('/budgets',       budgetRoutes); // [ORÇAMENTO] /budgets*
 v1Router.use('/growth',        growthRoutes);
 v1Router.use('/open-finance',  openFinanceRoutes);
 
