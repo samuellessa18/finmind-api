@@ -110,6 +110,7 @@ const financeRoutes       = require('./routes/financeRoutes');
 const adminRoutes         = require('./routes/adminRoutes');
 const adminUserRoutes     = require('./routes/adminUserRoutes'); // [ADMIN] painel de usuários (RBAC por role)
 const budgetRoutes        = require('./routes/budgetRoutes'); // [ORÇAMENTO] limites por categoria
+const patternRoutes       = require('./routes/patternRoutes'); // [PADRÕES] GET /patterns (consulta read-only)
 const growthRoutes        = require('./routes/growthRoutes');
 const authRoutes          = require('./routes/authRoutes');
 const openFinanceRoutes   = require('./routes/openFinanceRoutes');
@@ -466,6 +467,7 @@ v1Router.use('/finance',       financeRoutes);
 v1Router.use('/admin',         adminRoutes);
 v1Router.use('/admin',         adminUserRoutes); // [ADMIN] /admin/users* (RBAC por role)
 v1Router.use('/budgets',       budgetRoutes); // [ORÇAMENTO] /budgets*
+v1Router.use('/patterns',      patternRoutes); // [PADRÕES] /patterns (read-only)
 v1Router.use('/growth',        growthRoutes);
 v1Router.use('/open-finance',  openFinanceRoutes);
 
