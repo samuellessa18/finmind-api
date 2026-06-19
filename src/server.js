@@ -129,6 +129,9 @@ const { loadUserById, tenantWhere }           = require('./services/tenantServic
 const { trackTelemetry }                      = require('./services/telemetryService');
 const { hasActiveTemporaryAI, canUseAI }      = require('./services/aiAccess'); // [FASE 3.4/3.5]
 const { generateInsight }                     = require('./services/insightGenerator'); // [FASE 3.5]
+const { buildFinancialContext }               = require('./services/financialContextBuilder'); // [FASE 4.2]
+const { generateFinancialNarration }          = require('./services/financialNarrator'); // [FASE 4.3]
+const { narrationToInsight }                  = require('./services/insightPersistence'); // [FASE 4.4]
 const { verifyGoogleToken, findOrCreateGoogleUser } = require('./services/googleAuth');
 const { runGrowthEngine }                     = require('./services/growthEngineService');
 
@@ -936,6 +939,35 @@ v1Router.post(
 
       // Mobile espera objeto direto em response.data (não envelope)
       res.json(insight);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// [FASE 4.4] POST /insights/narrate — narração financeira DETERMINÍSTICA a partir do
+// contexto consolidado (FASE 4.2) interpretado pelo narrador (FASE 4.3). SEM OpenAI.
+// Pipeline: authenticateToken → requireAIAccess → usageLimiter → buildFinancialContext
+//   → generateFinancialNarration → persiste Insight (estrutura {type,message}) → payload.
+v1Router.post(
+  '/insights/narrate',
+  authenticateToken,
+  requireAIAccess,
+  usageLimiter('ai_insight'),
+  async (req, res, next) => {
+    try {
+      const userId = req.user.id;
+      const context = await buildFinancialContext(userId);
+      const narration = await generateFinancialNarration(context);
+      const { type, message } = narrationToInsight(narration, context);
+      await prisma.insight.create({ data: { userId, type, message } });
+      res.json({
+        title: narration.title,
+        summary: narration.summary,
+        recommendations: narration.recommendations,
+        generatedBy: narration.generatedBy,
+        generatedAt: context.generatedAt,
+      });
     } catch (error) {
       next(error);
     }
