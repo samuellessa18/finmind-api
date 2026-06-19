@@ -15,8 +15,8 @@
 //   - Mantém a fronteira do projeto: "o motor calcula, a IA narra" (system prompt
 //     proíbe recalcular/inventar números).
 
-const DEFAULT_MODEL = 'claude-opus-4-8'; // sobrescrevível por LLM_MODEL (ver FASE 5.2)
-const DEFAULT_TIMEOUT_MS = 15000;
+const DEFAULT_MODEL = 'claude-sonnet-4-6'; // [FASE 5.2] default; sobrescrevível por LLM_MODEL
+const DEFAULT_TIMEOUT_MS = 10000;          // [FASE 5.2] 10s; sobrescrevível por LLM_TIMEOUT_MS
 const DEFAULT_MAX_TOKENS = 1024;
 
 const SYSTEM_PROMPT = [
@@ -95,10 +95,14 @@ async function narrate(context) {
     throw new Error('anthropicProvider: resposta do LLM sem bloco de texto');
   }
   const parsed = JSON.parse(block.text);
+  const u = res && res.usage ? res.usage : null;
   return {
     title: String(parsed.title || ''),
     summary: String(parsed.summary || ''),
     recommendations: Array.isArray(parsed.recommendations) ? parsed.recommendations.map(String) : [],
+    // [FASE 5.2] metadados p/ observabilidade (NÃO retornados ao usuário pelo narrator):
+    model,
+    usage: u ? { input_tokens: u.input_tokens ?? null, output_tokens: u.output_tokens ?? null } : null,
   };
 }
 

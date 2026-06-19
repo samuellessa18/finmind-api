@@ -18,6 +18,11 @@
 // cairá para o narrador determinístico. `generatedBy` refletirá a origem real
 // ('llm' | 'deterministic'). Nesta fase só existe o determinístico.
 
+// [FASE 5.2] Seam ATIVO: provider LLM (com gate de canário) + observabilidade mínima.
+const { getLlmProvider } = require('./llm');
+const anthropicProvider = require('./llm/anthropicProvider');
+const { logNarration, classifyFallbackReason } = require('./llm/narrationLog');
+
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 // Contexto "vazio": sem dinheiro movimentado, sem orçamentos, sem padrões e
@@ -103,23 +108,34 @@ function deterministicNarrate(context) {
 
 /**
  * Gera a narração financeira a partir do contexto (saída do buildFinancialContext).
- * FASE 4.3: apenas o provider determinístico. `options.provider` é o seam para o
- * LLM futuro (com fallback determinístico). Sempre resolve — nunca lança por
- * indisponibilidade de IA (pois não há IA nesta fase).
+ * [FASE 5.2] Seam ATIVO: tenta o provider LLM (Claude) SE selecionado, com chave e com
+ * o usuário no canário; em QUALQUER falha cai no determinístico. NUNCA lança por causa do
+ * provider — o endpoint nunca recebe 500 por erro de IA.
  * @param {object} context  resultado de buildFinancialContext()
- * @param {{provider?: 'deterministic'|'llm'}} [options]
+ * @param {{userId?: string|number|null}} [options]  userId p/ o gate de canário
  * @returns {Promise<{title:string, summary:string, recommendations:string[], generatedBy:string}>}
  */
 async function generateFinancialNarration(context, options = {}) {
-  const provider = options.provider || 'deterministic';
+  const userId = options.userId != null ? options.userId : null;
+  const provider = getLlmProvider(process.env, userId); // null se inativo/sem-chave/fora-do-canário
+  const model = process.env.LLM_MODEL || anthropicProvider.DEFAULT_MODEL;
+  const t0 = Date.now();
 
-  // SEAM (futuro 4.4+): provider LLM com fallback determinístico.
-  // if (provider === 'llm' && llmProvider && llmProvider.isAvailable()) {
-  //   try { return { ...(await llmProvider.narrate(context)), generatedBy: 'llm' }; }
-  //   catch (e) { /* timeout/quota/erro → cai no determinístico abaixo */ }
-  // }
-  void provider; // reservado; nesta fase sempre determinístico
+  if (provider) {
+    try {
+      const llm = await provider.narrate(context);
+      logNarration({ generatedBy: 'llm', provider: 'anthropic', model: llm.model || model, duration_ms: Date.now() - t0, fallback_reason: null, usage: llm.usage });
+      return { title: llm.title, summary: llm.summary, recommendations: llm.recommendations, generatedBy: 'llm' };
+    } catch (e) {
+      // Nenhum erro do provider escapa: registra o motivo e cai no determinístico.
+      logNarration({ generatedBy: 'deterministic', provider: 'anthropic', model, duration_ms: Date.now() - t0, fallback_reason: classifyFallbackReason(e), usage: null });
+      const narration = deterministicNarrate(context);
+      return { title: narration.title, summary: narration.summary, recommendations: narration.recommendations, generatedBy: 'deterministic' };
+    }
+  }
 
+  // Provider inativo (default / sem-chave / fora-do-canário) → determinístico.
+  logNarration({ generatedBy: 'deterministic', provider: null, model: null, duration_ms: Date.now() - t0, fallback_reason: 'provider_inactive', usage: null });
   const narration = deterministicNarrate(context);
   return {
     title: narration.title,

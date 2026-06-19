@@ -932,7 +932,7 @@ v1Router.post(
     try {
       const userId = req.user.id;
       const context = await buildFinancialContext(userId);
-      const narration = await generateFinancialNarration(context);
+      const narration = await generateFinancialNarration(context, { userId });
       const { type, message } = narrationToInsight(narration, context);
       await prisma.insight.create({ data: { userId, type, message } });
       res.json({
