@@ -15,6 +15,7 @@
     "audit:high": "npm audit --audit-level=high"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.105.0",
     "@prisma/client": "^5.22.0",
     "@sentry/node": "^7.120.4",
     "axios": "^1.15.2",
