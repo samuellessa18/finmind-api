@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
-    "@prisma/client": "^5.22.0",
+    "@prisma/client": "^7.8.0",
     "@sentry/node": "^7.120.4",
     "axios": "^1.15.2",
     "bcryptjs": "^2.4.3",
