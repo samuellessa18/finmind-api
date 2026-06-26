@@ -63,6 +63,13 @@ model User {
   sessions         Session[]
   budgets          Budget[]
 
+  // [Consultor E1] relações inversas dos modelos de chat (ChatErasureAudit NÃO tem FK)
+  chatConversations ChatConversation[]
+  chatTurns         ChatTurn[]
+  chatMessages      ChatMessage[]
+  chatUsage         ChatUsage[]
+  userConsents      UserConsent[]
+
   @@index([email]) // Busca por email no login
   @@index([googleId]) // Busca no OAuth Google
   @@index([createdAt]) // Métricas de admin segmentadas por data
@@ -166,8 +173,8 @@ model DailySnapshot {
   savingsRate       Float
   riskLevel         String
   predictedExpenses Float
-  score             Int?     // [SCORE] Score financeiro 0–100 (histórico p/ evolução)
-  scoreBreakdown    Json?    // [SCORE] sub-notas + pesos aplicados (transparência/explicação)
+  score             Int? // [SCORE] Score financeiro 0–100 (histórico p/ evolução)
+  scoreBreakdown    Json? // [SCORE] sub-notas + pesos aplicados (transparência/explicação)
   createdAt         DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -376,4 +383,137 @@ model BankTransaction {
   @@index([userId, date])
   @@index([userId, finmindCategory])
   @@index([importedTxId]) // Para checar duplicatas
+}
+
+// ──────────────────────────────────────────────────────────────
+// CONSULTOR FINANCEIRO IA — E1 (Baseline v1.2 §1)
+// docs/architecture/consultor-financeiro-ia/baseline-v1.2.md
+// Greenfield/aditivo. Enums = String + comentário. IDs cuid.
+// FKs compostas tenant-carrying via @@unique([id,userId]).
+// Índice PARCIAL de reconciliação + CHECK billedAt<=>BILLED vão como SQL bruto na
+// migration (Prisma 5 não emite predicado parcial nem CHECK) — Apêndice C.
+// ──────────────────────────────────────────────────────────────
+
+model ChatConversation {
+  id         String    @id @default(cuid())
+  userId     String
+  title      String?
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  turns       ChatTurn[]
+  // ChatMessage NÃO tem FK direta para ChatConversation: conversationId é coluna
+  // denormalizada; o cascade da conversa chega às mensagens via ChatTurn.
+
+  @@unique([id, userId])
+  @@index([userId, updatedAt])
+  @@index([userId, archivedAt])
+  @@index([createdAt])
+}
+
+model ChatTurn {
+  id                    String    @id @default(cuid())
+  conversationId        String
+  userId                String
+  seq                   Int
+  idempotencyKey        String?
+  requestHash           String
+  state                 String    @default("ADMITTED")
+  dayKey                String
+  providerCallStartedAt DateTime?
+  billedAt              DateTime?
+  refundedAt            DateTime?
+  stopReason            String?
+  usageInputTokens      Int?
+  usageOutputTokens     Int?
+  usageToolInputTokens  Int?
+  usageToolOutputTokens Int?
+  costMicroUSD          Decimal?
+  messageCount          Int       @default(0)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  conversation ChatConversation @relation(fields: [conversationId, userId], references: [id, userId], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages     ChatMessage[]
+
+  @@unique([conversationId, seq])
+  @@unique([conversationId, idempotencyKey])
+  @@unique([id, userId])
+  @@index([userId, updatedAt])
+}
+
+model ChatMessage {
+  id                  String   @id @default(cuid())
+  turnId              String
+  conversationId      String
+  userId              String
+  seq                 Int
+  role                String
+  content             String?
+  assistantMessageSeq Int?
+  createdAt           DateTime @default(now())
+
+  turn               ChatTurn          @relation(fields: [turnId, userId], references: [id, userId], onDelete: Cascade)
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([turnId, seq])
+  @@unique([conversationId, assistantMessageSeq])
+  @@index([conversationId, createdAt])
+  @@index([userId, createdAt])
+  @@index([createdAt])
+}
+
+model ChatUsage {
+  id                  String   @id @default(cuid())
+  userId              String
+  dayKey              String
+  count               Int      @default(0)
+  tokensInput         Int      @default(0)
+  tokensOutput        Int      @default(0)
+  tokensCacheRead     Int      @default(0)
+  tokensCacheCreation Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dayKey])
+}
+
+model ChatErasureAudit {
+  id                       String    @id @default(cuid())
+  subjectUserId            String
+  actorType                String
+  actorUserId              String?
+  mode                     String
+  chatConversationsDeleted Int       @default(0)
+  chatTurnsDeleted         Int       @default(0)
+  chatMessagesDeleted      Int       @default(0)
+  chatUsageRowsDeleted     Int       @default(0)
+  consentRecordsDeleted    Int       @default(0)
+  consentScopeHash         String?
+  consentTimestamp         DateTime?
+  externalActionsPerformed String?
+  erasedAt                 DateTime  @default(now())
+  pruneEligibleAt          DateTime?
+
+  @@index([subjectUserId])
+  @@index([erasedAt])
+  @@index([pruneEligibleAt])
+}
+
+model UserConsent {
+  id        String    @id @default(cuid())
+  userId    String
+  scope     String
+  grantedAt DateTime  @default(now())
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, scope])
 }
