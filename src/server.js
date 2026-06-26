@@ -1249,6 +1249,9 @@ async function startServer() {
     console.log('🚀 Iniciando FinMind API...');
     console.log(`📍 Ambiente: ${process.env.NODE_ENV}`);
 
+    // [Consultor · Pré-fase] Diagnóstico de runtime: TZ=UTC (Baseline v1.2, RFC0004 inv.39).
+    require('./lib/chatRuntime').assertUtcRuntime();
+
     await prisma.$connect();
     console.log('✅ Conexão com PostgreSQL estabelecida.');
 

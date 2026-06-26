@@ -152,9 +152,17 @@ router.delete('/users/:id', authenticateToken, requireSuperAdmin, async (req, re
     const before = await prisma.user.findUnique({ where: { id: req.params.id }, select: SAFE_USER });
     if (!before) return res.status(404).json({ error: 'Usuário não encontrado.' });
 
+    // [Hotfix LGPD #1] O erasure de conta é destrutivo e a trilha (AdminAudit, sem FK)
+    // SOBREVIVE ao cascade — então o snapshot NÃO pode reter PII do titular esquecido.
+    // Minimiza o `before`: remove name/email (Baseline v1.2 §12, RFC0003/0004). Demais
+    // rotas admin (update_*) mantêm SAFE_USER, pois o usuário continua existindo.
+    const beforeMinimized = { ...before };
+    delete beforeMinimized.name;
+    delete beforeMinimized.email;
+
     await prisma.$transaction(async (tx) => {
       // Auditoria ANTES do delete (AdminAudit não tem FK → sobrevive ao cascade).
-      await writeAudit(tx, { adminId: req.user.id, targetUserId: req.params.id, action: 'delete_user', before, after: undefined });
+      await writeAudit(tx, { adminId: req.user.id, targetUserId: req.params.id, action: 'delete_user', before: beforeMinimized, after: undefined });
       await tx.user.delete({ where: { id: req.params.id } });
     });
     res.json({ success: true });
