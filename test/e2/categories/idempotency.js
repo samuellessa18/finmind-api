@@ -133,4 +133,44 @@ module.exports = (ctx) => {
     assert.strictEqual(t.state, 'DISPATCHING'); // intacto
     assert.strictEqual(await H.usageCount(prisma, u.id, DAY), 1);
   });
+
+  test('CROSS-TENANT-REPLAY · A não consegue replay do turno de B; same-user segue funcionando (E2.2, anti-IDOR)', async () => {
+    const { prisma } = ctx;
+    const uA = await H.seedUser(prisma, { plan: 'free' });
+    const uB = await H.seedUser(prisma, { plan: 'free' });
+    const convB = await H.seedConversation(prisma, uB.id);
+
+    // B admite um turno com uma idempotencyKey
+    const rB = await admitTurn(prisma, { userId: uB.id, conversationId: convB.id, idempotencyKey: 'shared-key', userMessage: 'segredo do B', plan: 'free', nowIso: NOW });
+    assert.strictEqual(rB.outcome, 'ADMITTED');
+    assert.strictEqual(await H.usageCount(prisma, uB.id, DAY), 1);
+
+    // A tenta usar a conversa de B + a MESMA idempotencyKey + o MESMO conteúdo (pior caso p/ vazamento).
+    // Com o dedupe e o re-lookup escopados por userId, A NUNCA recebe o turno de B. A admissão falha
+    // FECHADA: reusando a key de B colide no unique (conversationId,idempotencyKey) → 23505 → re-lookup
+    // escopado por uA acha NADA → relança (HTTP 409); com key nova cairia na FK composta (23503 → 503).
+    // Em ambos os casos: sem replay, sem vazar o turno de B. (O 403/404 ideal é a checagem de posse
+    // da rota da 1C — contrato a montante; aqui o motor garante a defesa em profundidade.)
+    let threw = false; let leaked = null; let status = null;
+    try {
+      leaked = await admitTurn(prisma, { userId: uA.id, conversationId: convB.id, idempotencyKey: 'shared-key', userMessage: 'segredo do B', plan: 'free', nowIso: NOW });
+    } catch (e) { threw = true; status = httpStatusForError(e); }
+
+    // INVARIANTE DE SEGURANÇA: A jamais obtém o turno de B (nem por replay, nem exposto em retorno).
+    const aGotBsTurn = !threw && leaked && leaked.turn && leaked.turn.id === rB.turn.id;
+    assert.strictEqual(aGotBsTurn, false, 'A NUNCA recebe o turno de B (anti-IDOR cross-tenant)');
+    if (threw) assert.ok(status >= 400, `cross-tenant falha fechada (status=${status}), sem replay/vazamento`);
+    // B intacto; A não criou turno nem consumiu cota
+    const tB = await prisma.chatTurn.findUnique({ where: { id: rB.turn.id } });
+    assert.strictEqual(tB.userId, uB.id, 'turno de B intacto e pertencente a B');
+    assert.strictEqual(await prisma.chatTurn.count({ where: { userId: uA.id } }), 0, 'A não criou turno');
+    assert.strictEqual(await H.usageCount(prisma, uA.id, DAY), 0, 'A não consumiu cota');
+    assert.strictEqual(await H.usageCount(prisma, uB.id, DAY), 1, 'cota de B intacta');
+
+    // SAME-USER continua funcionando: B replica a própria key/conteúdo → recebe o PRÓPRIO turno, sem 2º débito
+    const rBreplay = await admitTurn(prisma, { userId: uB.id, conversationId: convB.id, idempotencyKey: 'shared-key', userMessage: 'segredo do B', plan: 'free', nowIso: NOW });
+    assert.ok(['IN_FLIGHT', 'REPLAY'].includes(rBreplay.outcome), 'same-user replica normalmente');
+    assert.strictEqual(rBreplay.turn.id, rB.turn.id, 'B recebe o próprio turno');
+    assert.strictEqual(await H.usageCount(prisma, uB.id, DAY), 1, 'sem 2º débito no replay same-user');
+  });
 };

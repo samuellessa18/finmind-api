@@ -282,4 +282,16 @@ module.exports = (ctx) => {
     assert.deepStrictEqual(seqs, Array.from({ length: 50 }, (_, i) => i + 1), 'seqs contíguos {1..50}, derivados sob o lock');
     await H.assertDriftZero(assert, prisma, u.id, DAY, NOW);
   });
+
+  test('LIMIT-UNIFORM-SHAPE · outcome LIMIT segue o contrato uniforme (turn: null) (E2.2)', async () => {
+    const { prisma } = ctx; const { u, conv } = await setup(ctx);
+    for (let i = 0; i < 5; i++) await admit(prisma, u.id, conv.id, 'k' + i, 'm' + i);
+    const over = await admit(prisma, u.id, conv.id, 'k5', 'm5');
+    assert.strictEqual(over.outcome, 'LIMIT');
+    assert.strictEqual(over.httpStatus, 429);
+    assert.ok('turn' in over, 'ramo LIMIT carrega a chave `turn` (forma uniforme com os demais outcomes)');
+    assert.strictEqual(over.turn, null, '`turn` é null no LIMIT (nenhum turno criado) — caller pode desestruturar com segurança');
+    assert.strictEqual(await H.usageCount(prisma, u.id, DAY), 5);
+    await H.assertDriftZero(assert, prisma, u.id, DAY, NOW);
+  });
 };

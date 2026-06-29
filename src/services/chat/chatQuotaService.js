@@ -62,9 +62,12 @@ async function admitTurn(prisma, params, opts = {}) {
         if (opts.afterLock) await opts.afterLock(tx);           // seam de injeção de falha (testes)
         const { dayKey } = await resolveNowContext(tx, nowIso); // D3 — dayKey server-derived
 
-        // (2) dedupe por (conversationId, idempotencyKey)
-        const existing = await tx.chatTurn.findUnique({
-          where: { conversationId_idempotencyKey: { conversationId, idempotencyKey } },
+        // (2) dedupe por (conversationId, idempotencyKey) — ESCOPADO por userId (E2.2):
+        // respeita o tenant; turno de OUTRO usuário nunca é servido por replay (anti-IDOR).
+        // Defesa em profundidade: o caller (1C) valida posse antes; se esquecer, o motor
+        // não vaza — a admissão cross-tenant falha fechada na FK composta (INSERT, passo 5).
+        const existing = await tx.chatTurn.findFirst({
+          where: { conversationId, idempotencyKey, userId },
         });
         if (existing) return replayOutcome(existing, requestHash);
 
@@ -102,7 +105,7 @@ async function admitTurn(prisma, params, opts = {}) {
         return { outcome: OUTCOME.ADMITTED, httpStatus: 201, turn };
       }, TX_OPTS);
     } catch (e) {
-      if (e instanceof QuotaLimitError) return { outcome: OUTCOME.LIMIT, httpStatus: 429 };
+      if (e instanceof QuotaLimitError) return { outcome: OUTCOME.LIMIT, httpStatus: 429, turn: null }; // contrato uniforme (E2.2): todo outcome carrega `turn`
       // ── DEFESA EM PROFUNDIDADE (23505) — INALCANÇÁVEL no fluxo normal de produção ──
       // Auditoria E2.1 (verificação adversarial unânime): este branch NÃO é atingível em
       // produção. O advisory lock por-usuário é o 1º statement da tx (acquireUserXactLock),
@@ -119,8 +122,8 @@ async function admitTurn(prisma, params, opts = {}) {
       // seam, simulando a janela que o lock fecha) — ver test/e2/categories/bank.js. NÃO há
       // caminho de produção que o atinja.
       if (pgState(e) === '23505') {
-        const again = await prisma.chatTurn.findUnique({
-          where: { conversationId_idempotencyKey: { conversationId, idempotencyKey } },
+        const again = await prisma.chatTurn.findFirst({
+          where: { conversationId, idempotencyKey, userId }, // E2.2: re-lookup também escopado por tenant
         });
         if (again) return replayOutcome(again, requestHash);
       }
