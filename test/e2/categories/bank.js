@@ -179,16 +179,53 @@ module.exports = (ctx) => {
     await H.assertDriftZero(assert, prisma, u.id, DAY, NOW);
   });
 
-  test('BANK-P2002-RELOOKUP-09/10/11 · corrida no unique → re-lookup, nunca 500', async () => {
+  test('BANK-DEDUPE-UNDER-LOCK-09/10/11 · same-key concorrente serializado pelo lock → DEDUPE (não 23505), 1 admissão, 0 5xx', async () => {
     const { prisma } = ctx; const { u, conv } = await setup(ctx);
+    // COBERTURA HONESTA (auditoria E2.1): o advisory lock por-usuário serializa as 20 admissões.
+    // Cada perdedora, ao adquirir o lock APÓS o commit da vencedora, encontra o turno no
+    // dedupe-SELECT (passo 2) e retorna replay ANTES do INSERT — portanto o caminho 23505→re-lookup
+    // do admitTurn NÃO é exercido aqui. Esse branch defensivo é coberto separadamente, e de forma
+    // genuína, por BANK-23505-RELOOKUP-DEFENSIVE (abaixo). Aqui provamos a resolução por DEDUPE.
     const res = await H.makeBarrier().run(20, () => admit(prisma, u.id, conv.id, 'SAME', 'igual'));
     const admitted = res.filter((x) => x.status === 'fulfilled' && x.value.outcome === 'ADMITTED').length;
     const rejected = res.filter((x) => x.status === 'rejected').length;
+    const replays = res.filter((x) => x.status === 'fulfilled' && ['REPLAY', 'IN_FLIGHT'].includes(x.value.outcome)).length;
     assert.strictEqual(admitted, 1, 'exatamente 1 admissão');
-    assert.strictEqual(rejected, 0, '23505 absorvido por re-lookup → nunca 5xx');
-    assert.strictEqual(await prisma.chatTurn.count({ where: { userId: u.id } }), 1, 'unique impede duplicata');
+    assert.strictEqual(replays, 19, '19 perdedoras resolvidas por dedupe (replay/in-flight)');
+    assert.strictEqual(rejected, 0, 'nenhuma 5xx (lock + dedupe absorvem as duplicatas)');
+    assert.strictEqual(await prisma.chatTurn.count({ where: { userId: u.id } }), 1, 'unique + lock impedem duplicata');
     assert.strictEqual(await H.usageCount(prisma, u.id, DAY), 1);
     await H.assertDriftZero(assert, prisma, u.id, DAY, NOW);
+  });
+
+  test('BANK-23505-RELOOKUP-DEFENSIVE · 23505 FORÇADO (corrida que o lock impede) → catch re-lookup → replay, sem 5xx (R17)', async () => {
+    const { prisma } = ctx; const { u, conv } = await setup(ctx);
+    const { computeRequestHash } = require('../../../src/services/chat/requestHash');
+    const msg = 'oi';
+    const rivalHash = computeRequestHash(conv.id, msg); // mesmo conteúdo → mesmo requestHash → replay (não conflito)
+    let fired = false;
+    // O seam afterQuota roda APÓS o dedupe-SELECT (que errou) e ANTES do INSERT do turno.
+    // Inserimos um turno RIVAL com a MESMA (conversationId, idempotencyKey) por uma conexão
+    // SEPARADA do pool (sem adquirir o advisory lock) — simula um caminho hipotético NÃO-travado
+    // que produziria a corrida que, em produção, o lock por-usuário fecha. O INSERT da admissão
+    // então colide (P2002/23505) e cai no branch defensivo → re-lookup → replay determinístico.
+    const r = await admitTurn(
+      prisma,
+      { userId: u.id, conversationId: conv.id, idempotencyKey: 'K', userMessage: msg, plan: 'free', nowIso: NOW },
+      {
+        afterQuota: async () => {
+          if (fired) return; fired = true;
+          await prisma.$executeRaw`
+            INSERT INTO "ChatTurn" (id,"conversationId","userId",seq,"idempotencyKey","requestHash",state,"dayKey","messageCount","createdAt","updatedAt")
+            VALUES ('rival_turn', ${conv.id}, ${u.id}, 1, 'K', ${rivalHash}, 'ADMITTED', ${DAY}, 1, now(), now())`;
+        },
+      },
+    );
+    assert.strictEqual(fired, true, 'o seam disparou — caminho 23505→re-lookup exercitado ≥1 (R17 satisfeito)');
+    assert.ok(['REPLAY', 'IN_FLIGHT'].includes(r.outcome), `catch re-lookup serve o turno existente (got ${r.outcome}); nunca 5xx`);
+    assert.strictEqual(r.turn.id, 'rival_turn', 're-lookup retornou exatamente o turno rival');
+    assert.strictEqual(await prisma.chatTurn.count({ where: { userId: u.id } }), 1, 'só o rival; a admissão deu rollback total (sem turno órfão)');
+    assert.strictEqual(await H.usageCount(prisma, u.id, DAY), 0, 'CAS da admissão revertida no rollback; rival não passou pela CAS → count=0');
   });
 
   test('ADM-FAIL-BETWEEN-CAS-AND-INSERT · falha entre passo 4 (count+1) e 5 (INSERT) → 503, 0 cota fantasma (R3)', async () => {

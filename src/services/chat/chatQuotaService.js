@@ -10,6 +10,7 @@
 //   D4 — 40001/40P01 esgotados → 503 (via withRetry + httpStatusForError).
 //   D5 — (id,userId) tratado como não-colidível (CUID).
 
+const { Prisma } = require('@prisma/client');
 const config = require('../../config/chatConfig');
 const { acquireUserXactLock } = require('../../lib/advisoryLock');
 const { computeRequestHash } = require('./requestHash');
@@ -19,7 +20,13 @@ const { ChatValidationError, QuotaLimitError, OUTCOME, pgState, withRetry } = re
 // Sob alta contenção (ex.: 500 admissões simultâneas do mesmo usuário), as transações
 // serializam no advisory lock — a seção crítica é minúscula, então DEVEM esperar na fila,
 // não estourar. Folga ampla em maxWait/timeout (o caso saudável resolve em ms).
-const TX_OPTS = { maxWait: 30000, timeout: 30000 };
+//
+// isolationLevel FIXADO em ReadCommitted (E2.1): a Baseline §4 exige READ COMMITTED para a tx
+// de admissão. O default do Postgres já é READ COMMITTED, mas fixá-lo torna o contrato explícito
+// e imune a um eventual `default_transaction_isolation` alterado no cluster/role (no-op no caso
+// saudável; defesa em profundidade). A corretude vem do advisory lock + CAS sobre linhas
+// committed — não de snapshot isolation.
+const TX_OPTS = { maxWait: 30000, timeout: 30000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted };
 
 function limitForPlan(plan) {
   return plan === 'pro' ? config.quota.proDailyLimit : config.quota.freeDailyLimit;
@@ -96,8 +103,22 @@ async function admitTurn(prisma, params, opts = {}) {
       }, TX_OPTS);
     } catch (e) {
       if (e instanceof QuotaLimitError) return { outcome: OUTCOME.LIMIT, httpStatus: 429 };
+      // ── DEFESA EM PROFUNDIDADE (23505) — INALCANÇÁVEL no fluxo normal de produção ──
+      // Auditoria E2.1 (verificação adversarial unânime): este branch NÃO é atingível em
+      // produção. O advisory lock por-usuário é o 1º statement da tx (acquireUserXactLock),
+      // e `conversationId` pertence a exatamente UM `userId` (FK composta + @@unique([id,userId])).
+      // Logo toda colisão possível nos uniques colidíveis — (conversationId,idempotencyKey) e
+      // (conversationId,seq) — é entre admissões do MESMO usuário, que serializam no lock: o
+      // perdedor, ao adquirir o lock APÓS o commit do vencedor, encontra o turno no dedupe-SELECT
+      // (passo 2, sob READ COMMITTED) e retorna replay ANTES do INSERT. O `seq` é derivado sob o
+      // lock (passo 5), então também não colide. Cross-user não compartilha `conversationId`
+      // (rejeitado pela FK = 23503, não 23505).
+      // Mantido como degradação graciosa caso a disciplina de lock mude no futuro (ex.: um caminho
+      // de insert que não adquira o lock): converte um 23505 em replay determinístico em vez de
+      // 5xx. Exercitado SOMENTE pelo teste BANK-23505-RELOOKUP-DEFENSIVE (que força a corrida via
+      // seam, simulando a janela que o lock fecha) — ver test/e2/categories/bank.js. NÃO há
+      // caminho de produção que o atinja.
       if (pgState(e) === '23505') {
-        // P2002: corrida no unique (idempotencyKey/seq) → re-lookup determinístico
         const again = await prisma.chatTurn.findUnique({
           where: { conversationId_idempotencyKey: { conversationId, idempotencyKey } },
         });
