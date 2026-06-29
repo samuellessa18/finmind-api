@@ -145,6 +145,12 @@ const authRoutes          = require('./routes/authRoutes');
 const openFinanceRoutes   = require('./routes/openFinanceRoutes');
 const pluggyWebhookRoutes = require('./routes/pluggyWebhookRoutes');
 const usageLimiter        = require('./middleware/usageLimiter');
+// [Consultor · 1C] Orquestração do chat (sobre o motor E2 congelado).
+const { createConversationRouter } = require('./routes/conversationRoutes');
+const { createRateLimiter }        = require('./services/conversation/rateLimiter');
+const { defaultMetrics: chatMetrics } = require('./services/conversation/metrics');
+const { buildChatProvider, buildToolExecutor } = require('./services/conversation/chatProvider');
+const { runChatReconciliationCron } = require('./jobs/chatReconciliationCron');
 const requestLogger       = require('./middleware/requestLogger');
 const errorHandler        = require('./middleware/errorHandler');
 const lightCache          = require('./middleware/cache');
@@ -1206,6 +1212,18 @@ console.log('📌 Auth routes mounted at /api/v1/auth/*');
 // Demais rotas
 app.use('/api/v1', v1Router);
 
+// [Consultor · 1C] POST /api/v1/conversations/turn — orquestração sobre o motor E2 congelado.
+// Provider de chat DORMENTE (gated LGPD): responde 503 chat_unavailable até a ativação funcional.
+const chatRateLimiter = createRateLimiter();
+app.use('/api/v1', createConversationRouter({
+  prisma,
+  rateLimiter: chatRateLimiter,
+  metrics: chatMetrics,
+  buildProvider: buildChatProvider,
+  buildToolExecutor,
+}));
+console.log('📌 Consultor 1C route mounted at /api/v1/conversations/turn');
+
 // ─────────────────────────────────────────────────────────────
 // 14. GLOBAL ERROR HANDLER
 // ─────────────────────────────────────────────────────────────
@@ -1277,6 +1295,21 @@ async function startServer() {
       setTimeout(() => {
         runGrowthEngine().catch(console.error);
       }, 60_000);
+
+      // [Consultor · 1C] Cron de reconciliação de chat (backstop definitivo, D1C-5/D1C-9).
+      // Resiliente: runChatReconciliationCron isola cada usuário em try/catch (um usuário nunca
+      // aborta o lote). try/catch externo segue o padrão dos demais crons (não re-lança).
+      cron.schedule('*/5 * * * *', async () => {
+        try {
+          const r = await runChatReconciliationCron(prisma, { metrics: chatMetrics });
+          if (r.refunded > 0 || r.failedUsers > 0) {
+            console.log(`[Consultor reconcile] users=${r.usersScanned} refunded=${r.refunded} failed=${r.failedUsers} truncated=${r.truncated}`);
+          }
+        } catch (err) {
+          console.error('[Consultor reconcile] erro inesperado:', err && err.message);
+          captureException(err, { tags: { cron: 'chat_reconcile' } });
+        }
+      });
 
       // Open Finance: verificar consentimentos expirados diariamente às 2h
       cron.schedule('0 2 * * *', async () => {

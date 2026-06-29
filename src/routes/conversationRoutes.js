@@ -1,0 +1,105 @@
+'use strict';
+
+// [Consultor · 1C] Rota POST /api/v1/conversations/turn — adaptador HTTP fino sobre o orquestrador.
+// Pilha (Baseline §2): auth → Zod(D1C-8) → posse 404(D1C-4) → rate-limit 429 → consent 403(D1C-7)
+//   → runTurn (lazy reconcile + admit + dispatch + conversate + bill). SSE no caminho ADMITTED;
+//   JSON com status nos demais outcomes (decisão pós-admit, antes de abrir o stream).
+//
+// Tudo INJETÁVEL (testável): prisma, rateLimiter, metrics, buildProvider, buildToolExecutor.
+// O provider real de chat é DORMENTE/gated (LGPD): se indisponível → 503 ANTES de consumir cota.
+
+const { z } = require('zod');
+const { authenticateToken } = require('../middleware/auth');
+const { findOwnedConversation } = require('../services/conversation/ownership');
+const { hasChatConsent } = require('../services/conversation/consentGate');
+const { runTurn } = require('../services/conversation/orchestrator');
+const { createHttpSse } = require('../services/conversation/sse');
+const { httpStatusForError } = require('../services/chat/chatErrors');
+
+const turnSchema = z.object({
+  conversationId: z.string().min(1).max(64),
+  userMessage: z.string().min(1),
+  idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,64}$/), // D1C-8 / Baseline §1
+});
+
+// D1C-6/herdado #2: plano SEMPRE do usuário autenticado, NUNCA do body/header.
+function derivePlan(user) {
+  return (user && (user.plan === 'pro' || user.isPremium === true)) ? 'pro' : 'free';
+}
+
+function bodyForResult(r) {
+  switch (r.outcome) {
+    case 'REPLAY':
+      return r.served
+        ? { turnId: r.turn.id, assistantMessageSeq: r.assistantMessageSeq, content: r.content }
+        : { turnId: r.turn.id, status: 'terminated', content: null }; // terminal-refundante: nada a servir
+    case 'IN_FLIGHT': return { turnId: r.turn.id, status: 'in_flight' };
+    case 'CONFLICT': return { error: 'idempotency_key_conflict' };
+    case 'LIMIT': return { error: 'quota_exceeded' };
+    case 'DISPATCH_LOST': return { error: 'unavailable', retryable: true };
+    case 'ERROR':
+    case 'BILLED_FALSE': return { error: 'unavailable', retryable: true };
+    case 'BILLED': return { turnId: r.turn.id, assistantMessageSeq: r.assistantMessageSeq, content: r.content };
+    default: return { error: 'unavailable' };
+  }
+}
+
+// Handler do turno (sem auth) — exportado para teste com mock req/res (req.user já populado).
+function makeTurnHandler(deps) {
+  const { prisma, rateLimiter, metrics, buildProvider, buildToolExecutor, tools = [] } = deps;
+  return async function turnHandler(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const plan = derivePlan(req.user);
+
+      // D1C-8: validação Zod de toda entrada (idempotencyKey obrigatória + formato).
+      const parsed = turnSchema.safeParse(req.body || {});
+      if (!parsed.success) return res.status(400).json({ error: 'invalid_request', details: parsed.error.issues });
+      const { conversationId, userMessage, idempotencyKey } = parsed.data;
+
+      // D1C-4: posse antes do guard; recurso alheio/inexistente → 404 (unificado, não vaza existência).
+      const conv = await findOwnedConversation(prisma, { conversationId, userId });
+      if (!conv) return res.status(404).json({ error: 'not_found' });
+
+      // Rate-limit best-effort ANTES do guard; 429-rate distinto de 429-quota.
+      if (rateLimiter) {
+        const rl = rateLimiter.check(userId);
+        if (!rl.allowed) {
+          res.set('Retry-After', String(Math.ceil((rl.retryAfterMs || 0) / 1000)));
+          return res.status(429).json({ error: 'rate_limited', retryable: true });
+        }
+      }
+
+      // D1C-7: consent LGPD antes do guard.
+      if (!(await hasChatConsent(prisma, userId))) return res.status(403).json({ error: 'consent_required' });
+
+      // Provider de chat DORMENTE/gated (LGPD): indisponível → 503 SEM consumir cota.
+      const provider = buildProvider ? buildProvider(req.user) : null;
+      if (!provider) return res.status(503).json({ error: 'chat_unavailable' });
+      const toolExecutor = buildToolExecutor ? buildToolExecutor(req.user) : null;
+
+      const sse = createHttpSse(res);
+      const result = await runTurn(
+        { prisma, provider, toolExecutor, metrics, sse, tools },
+        { userId, conversationId, idempotencyKey, userMessage, plan },
+      );
+
+      if (sse.opened) return res.end(); // stream ADMITTED: deltas + done/error já emitidos
+      return res.status(result.httpStatus).json(bodyForResult(result));
+    } catch (e) {
+      // Erro de DB propagado pelo motor (ex.: 40001/40P01 esgotado) → mapeia via E2.
+      const status = httpStatusForError(e);
+      if (res.headersSent) { try { res.end(); } catch (_) {} return undefined; }
+      return res.status(status).json({ error: 'unavailable', retryable: status === 503 });
+    }
+  };
+}
+
+function createConversationRouter(deps) {
+  const express = require('express');
+  const router = express.Router();
+  router.post('/conversations/turn', authenticateToken, makeTurnHandler(deps));
+  return router;
+}
+
+module.exports = { createConversationRouter, makeTurnHandler, turnSchema, derivePlan, bodyForResult };
