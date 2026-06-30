@@ -14,6 +14,8 @@ const { findOwnedConversation } = require('../services/conversation/ownership');
 const { hasChatConsent } = require('../services/conversation/consentGate');
 const { runTurn } = require('../services/conversation/orchestrator');
 const { createHttpSse } = require('../services/conversation/sse');
+const { startHeartbeat } = require('../services/conversation/heartbeat');
+const orchestratorConfig = require('../config/chatOrchestratorConfig');
 const { httpStatusForError } = require('../services/chat/chatErrors');
 
 const turnSchema = z.object({
@@ -46,7 +48,10 @@ function bodyForResult(r) {
 
 // Handler do turno (sem auth) — exportado para teste com mock req/res (req.user já populado).
 function makeTurnHandler(deps) {
-  const { prisma, rateLimiter, metrics, buildProvider, buildToolExecutor, tools = [] } = deps;
+  const {
+    prisma, rateLimiter, metrics, buildProvider, buildToolExecutor, tools = [],
+    heartbeatMs = orchestratorConfig.sse.heartbeatMs, // D1D-7: intervalo do keep-alive (fonte única; injetável p/ teste)
+  } = deps;
   return async function turnHandler(req, res, next) {
     try {
       const userId = req.user.id;
@@ -79,10 +84,19 @@ function makeTurnHandler(deps) {
       const toolExecutor = buildToolExecutor ? buildToolExecutor(req.user) : null;
 
       const sse = createHttpSse(res);
-      const result = await runTurn(
-        { prisma, provider, toolExecutor, metrics, sse, tools },
-        { userId, conversationId, idempotencyKey, userMessage, plan },
-      );
+      // D1D-7: keep-alive de TRANSPORTE. Guard isOpen → só emite DEPOIS que o stream abriu por um frame
+      // real (delta/done/error); em outcomes não-streaming (LIMIT/CONFLICT/...) sse.opened=false e o
+      // heartbeat NUNCA escreve → preserva a resposta JSON+status. Timer unref'd; stop() no finally.
+      const heartbeat = startHeartbeat(sse, heartbeatMs, { isOpen: () => sse.opened });
+      let result;
+      try {
+        result = await runTurn(
+          { prisma, provider, toolExecutor, metrics, sse, tools },
+          { userId, conversationId, idempotencyKey, userMessage, plan },
+        );
+      } finally {
+        heartbeat.stop();
+      }
 
       if (sse.opened) return res.end(); // stream ADMITTED: deltas + done/error já emitidos
       return res.status(result.httpStatus).json(bodyForResult(result));

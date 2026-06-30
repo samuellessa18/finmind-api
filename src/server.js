@@ -151,6 +151,10 @@ const { createRateLimiter }        = require('./services/conversation/rateLimite
 const { defaultMetrics: chatMetrics } = require('./services/conversation/metrics');
 const { buildChatProvider, buildToolExecutor } = require('./services/conversation/chatProvider');
 const { runChatReconciliationCron } = require('./jobs/chatReconciliationCron');
+// [Consultor · 1D] Observabilidade da ativação: endpoint admin de métricas + amostragem de drift no cron.
+const { createChatMetricsRouter } = require('./routes/chatMetricsRoutes');
+const { computeDriftSnapshot, isDriftNonZero } = require('./services/conversation/driftGauge');
+const { describeGate: describeChatGate } = require('./config/chatProviderConfig');
 const requestLogger       = require('./middleware/requestLogger');
 const errorHandler        = require('./middleware/errorHandler');
 const lightCache          = require('./middleware/cache');
@@ -1224,6 +1228,16 @@ app.use('/api/v1', createConversationRouter({
 }));
 console.log('📌 Consultor 1C route mounted at /api/v1/conversations/turn');
 
+// [Consultor · 1D] Endpoint admin de observabilidade (gated: AI_CHAT_METRICS_ENABLED + ADMIN_TOKEN).
+// Lê o MESMO singleton de métricas que o orquestrador incrementa. Desligado por padrão → 404.
+app.use('/api/v1', createChatMetricsRouter({ metrics: chatMetrics }));
+
+// [Consultor · 1D] Log de boot do gate (SEM segredos): provider/key-presente/contagem-canário/armado.
+{
+  const g = describeChatGate();
+  console.log(`📌 Consultor chat gate: provider=${g.provider || '(none)'} validProvider=${g.providerValid} apiKey=${g.hasApiKey ? 'present' : 'absent'} canaryUsers=${g.canaryCount} → ${g.armed ? 'ARMADO (canário)' : 'DORMENTE (503)'}`);
+}
+
 // ─────────────────────────────────────────────────────────────
 // 14. GLOBAL ERROR HANDLER
 // ─────────────────────────────────────────────────────────────
@@ -1304,6 +1318,18 @@ async function startServer() {
           const r = await runChatReconciliationCron(prisma, { metrics: chatMetrics });
           if (r.refunded > 0 || r.failedUsers > 0) {
             console.log(`[Consultor reconcile] users=${r.usersScanned} refunded=${r.refunded} failed=${r.failedUsers} truncated=${r.truncated}`);
+          }
+          // [Consultor · 1D] Amostragem de drift APÓS reconciliar (saudável ⇒ 0). SELECT read-only próprio;
+          // best-effort isolado — NUNCA afeta a reconciliação nem derruba o cron.
+          try {
+            const snap = await computeDriftSnapshot(prisma);
+            if (isDriftNonZero(snap)) {
+              chatMetrics.inc('drift_nonzero');
+              const bad = snap.filter((x) => x.drift !== 0).slice(0, 5);
+              console.warn('[Consultor drift] drift!=0 detectado:', JSON.stringify(bad));
+            }
+          } catch (e) {
+            console.error('[Consultor drift] amostragem falhou (ignorada):', e && e.message);
           }
         } catch (err) {
           console.error('[Consultor reconcile] erro inesperado:', err && err.message);

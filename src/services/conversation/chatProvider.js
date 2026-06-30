@@ -1,23 +1,25 @@
 'use strict';
 
-// [Consultor · 1C] Seam do provider REAL de chat (tool-use) — DORMENTE/gated (LGPD), como a narração
-// da FASE 5.x. O adaptador real do Anthropic com tool-use + as ferramentas financeiras determinísticas
-// são uma sub-fase FUNCIONAL futura (o plano de validação da 1C exercita a orquestração com STUB).
+// [Consultor · 1D] Seams do provider de chat — ATIVADOS por env (gate único, FASE 1D).
+// Gate dormente/gated por LGPD (D1D-10): sem AI_CHAT_PROVIDER+ANTHROPIC_API_KEY+canário, ambos
+// retornam null → a rota responde 503 chat_unavailable SEM consumir cota. NENHUMA chamada externa
+// sem configuração explícita. buildChatProvider e buildToolExecutor usam a MESMA função de gate
+// (isChatProviderEnabled) — provider e executor nunca divergem (R-D1D2-GATE).
 //
-// Enquanto dormente: buildChatProvider() retorna null → a rota responde 503 chat_unavailable SEM
-// consumir cota. NENHUMA chamada externa sem configuração explícita (coerente com getLlmProvider).
-//
-// A ativação real (futura) construirá um provider.run({messages,tools,signal}) sobre
-// anthropicProvider/messages.create com tools, e um toolExecutor que lê do motor financeiro
-// determinístico (números do motor, a IA narra). Não implementado aqui por estar fora do escopo
-// do plano de validação da 1C e por exigir nova especificação de ferramentas.
+// O adapter run() é NOVO (anthropicChatAdapter, sobre messages.create COM tools) — não toca a FASE 5.
 
-function buildChatProvider(/* user */) {
-  return null; // dormente: feature de chat não ativada em produção
+const { isChatProviderEnabled } = require('../../config/chatProviderConfig');
+const { createChatProvider } = require('./anthropicChatAdapter');
+const { makeToolExecutor } = require('./tools/financialTools');
+
+function buildChatProvider(user) {
+  if (!isChatProviderEnabled(process.env, user && user.id)) return null; // dormente
+  return createChatProvider();
 }
 
-function buildToolExecutor(/* user */) {
-  return null; // sem ferramentas até a sub-fase funcional
+function buildToolExecutor(user) {
+  if (!isChatProviderEnabled(process.env, user && user.id)) return null; // mesmo gate que o provider
+  return makeToolExecutor(user && user.id);
 }
 
 module.exports = { buildChatProvider, buildToolExecutor };
