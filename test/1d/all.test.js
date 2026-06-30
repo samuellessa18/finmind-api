@@ -21,3 +21,4 @@ require('./metricsRoute')();
 require('./tools')(ctx);
 require('./driftGauge')(ctx);
 require('./e2e')(ctx);
+require('./toolsWiring')(ctx); // [1D.1] fiação real das tool definitions + guard estático

@@ -150,6 +150,7 @@ const { createConversationRouter } = require('./routes/conversationRoutes');
 const { createRateLimiter }        = require('./services/conversation/rateLimiter');
 const { defaultMetrics: chatMetrics } = require('./services/conversation/metrics');
 const { buildChatProvider, buildToolExecutor } = require('./services/conversation/chatProvider');
+const { getToolDefinitions } = require('./services/conversation/tools/financialTools'); // [1D.1] catálogo (SSOT) p/ o provider
 const { runChatReconciliationCron } = require('./jobs/chatReconciliationCron');
 // [Consultor · 1D] Observabilidade da ativação: endpoint admin de métricas + amostragem de drift no cron.
 const { createChatMetricsRouter } = require('./routes/chatMetricsRoutes');
@@ -1225,6 +1226,7 @@ app.use('/api/v1', createConversationRouter({
   metrics: chatMetrics,
   buildProvider: buildChatProvider,
   buildToolExecutor,
+  tools: getToolDefinitions(), // [1D.1] fia a SSOT do catálogo (5 tools read-only) à cadeia já existente
 }));
 console.log('📌 Consultor 1C route mounted at /api/v1/conversations/turn');
 
