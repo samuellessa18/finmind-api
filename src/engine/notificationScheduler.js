@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const prisma = require('../../prisma/client');
+const { guardedJob } = require('../lib/jobTracker'); // [F0.2A] rastreio p/ graceful shutdown
 const { calculateSummary } = require('./financialEngine');
 // [FASE 4] Observabilidade — no-op se Sentry não configurado
 const { captureException } = require('../lib/sentry');
@@ -154,10 +155,10 @@ async function runNotificationScheduler() {
 
 function startNotificationScheduler() {
   console.log('[NotificationScheduler] Iniciando agendador de notificações...');
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('0 * * * *', guardedJob(async () => {
     await runNotificationScheduler();
-  });
-  runNotificationScheduler();
+  }));
+  guardedJob(runNotificationScheduler)().catch((e) => console.error('[NotificationScheduler] erro no boot:', e && e.message));
   console.log('[NotificationScheduler] Executando verificação a cada hora');
 }
 

@@ -156,6 +156,11 @@ const { runChatReconciliationCron } = require('./jobs/chatReconciliationCron');
 const { createChatMetricsRouter } = require('./routes/chatMetricsRoutes');
 const { computeDriftSnapshot, isDriftNonZero } = require('./services/conversation/driftGauge');
 const { describeGate: describeChatGate } = require('./config/chatProviderConfig');
+// [F0.2A] Hardening do shutdown/health.
+const { runShutdown } = require('./lib/gracefulShutdown');
+const jobTracker = require('./lib/jobTracker');
+const { guardedJob } = jobTracker;
+const { createHealthRouter } = require('./routes/healthRoutes');
 const requestLogger       = require('./middleware/requestLogger');
 const errorHandler        = require('./middleware/errorHandler');
 const lightCache          = require('./middleware/cache');
@@ -362,23 +367,10 @@ app.get('/api/health', async (req, res) => {
   res.status(health.success ? 200 : 503).json(health);
 });
 
-// [F0] Liveness — o processo está vivo? NÃO consulta DB nem dependências externas.
-// É este o endpoint que o Render deve sondar (restart-probe): responder 200 mesmo com o
-// DB indisponível evita reciclagens desnecessárias por lentidão de dependência.
-app.get('/api/health/live', (req, res) => {
-  res.status(200).json({ status: 'ok', check: 'liveness', timestamp: new Date().toISOString() });
-});
-
-// [F0] Readiness — o processo está apto a servir tráfego? Checa SOMENTE a dependência
-// crítica (banco). JAMAIS chama OpenAI/Anthropic — prontidão não deve depender de terceiros.
-app.get('/api/health/ready', async (req, res) => {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    return res.status(200).json({ status: 'ready', checks: { database: 'connected' }, timestamp: new Date().toISOString() });
-  } catch {
-    return res.status(503).json({ status: 'not_ready', checks: { database: 'error' }, timestamp: new Date().toISOString() });
-  }
-});
+// [F0.2A] Health router: /api/health/live (liveness sem deps) + /api/health/ready (conexão +
+// migrations compatíveis). Extraído para módulo testável; readiness deixou de ser SELECT 1 (falso
+// positivo em schema drift) e passa a validar _prisma_migrations contra o catálogo do código.
+app.use('/api/health', createHealthRouter({ prisma }));
 
 // ─────────────────────────────────────────────────────────────
 // 10. SCHEMAS ZOD
@@ -1302,32 +1294,37 @@ let shuttingDown = false;
 async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  jobTracker.beginShutdown(); // crons já em voo não iniciam novo lote; drainJobs espera os atuais
   console.log(`\n[shutdown] Sinal ${signal} recebido — encerrando graciosamente...`);
 
-  // Se o drain travar, força a saída para não deixar o Render matar o processo sujo.
+  // Backstop de DEADLINE. Os orçamentos internos (drain 3s + grace 1.5s + flush 1.5s ≈ 6s + latência
+  // do $disconnect) somam bem abaixo dos 10s. Atingir o deadline durante um teardown de deploy NÃO é
+  // falha do processo (o container está sendo destruído) → sai com 0 para não gerar falso alerta de
+  // crash. Erro REAL do próprio shutdown ainda sai com 1 (catch abaixo).
   const forceTimer = setTimeout(() => {
-    console.error('[shutdown] Timeout de drain (10s) — forçando saída.');
-    process.exit(1);
+    console.warn('[shutdown] Deadline de 10s atingido — encerrando (best-effort).');
+    process.exit(0);
   }, 10_000);
   if (forceTimer && typeof forceTimer.unref === 'function') forceTimer.unref();
 
   try {
-    // 1) Parar timers/crons: não aceitar novo trabalho agendado.
-    try { for (const task of cron.getTasks().values()) { try { task.stop(); } catch (_) {} } } catch (_) {}
-    if (growthWarmupTimer) { try { clearTimeout(growthWarmupTimer); } catch (_) {} }
-
-    // 2) Parar de aceitar novas conexões HTTP e drenar as em voo.
-    if (httpServer) {
-      await new Promise((resolve) => httpServer.close(() => resolve()));
-      console.log('[shutdown] HTTP server fechado (conexões drenadas).');
-    }
-
-    // 3) Fechar o pool do Prisma.
-    try { await prisma.$disconnect(); console.log('[shutdown] Prisma desconectado.'); } catch (_) {}
-
-    // 4) Flush do Sentry (no-op se DSN ausente).
-    try { await flushSentry(2000); } catch (_) {}
-
+    await runShutdown({
+      httpServer,
+      stopScheduling: () => {
+        try { for (const task of cron.getTasks().values()) { try { task.stop(); } catch (_) {} } } catch (_) {}
+        if (growthWarmupTimer) { try { clearTimeout(growthWarmupTimer); } catch (_) {} }
+      },
+      drainJobs: async () => {
+        // Best-effort: um cron longo (ex.: dailyAnalysis em base grande) pode exceder o teto. Nesse
+        // caso seguimos para o $disconnect e registramos — o try/catch de cada cron evita crash.
+        const ok = await jobTracker.drainJobs(3000);
+        if (!ok) console.warn(`[shutdown] drain incompleto: ${jobTracker.activeJobs()} job(s) ainda em voo`);
+      },
+      disconnectPrisma: () => prisma.$disconnect(),
+      flush: () => flushSentry(1500),
+      log: (m) => console.log(m),
+      graceMs: 1500,                                 // força closeAllConnections (SSE) após 1.5s
+    });
     clearTimeout(forceTimer);
     console.log('[shutdown] Encerramento limpo. Saindo (0).');
     process.exit(0);
@@ -1366,23 +1363,23 @@ async function startServer() {
       startNotificationScheduler();
 
       console.log('[GROWTH] Agendando motor de automação...');
-      cron.schedule('0 */4 * * *', async () => {
+      cron.schedule('0 */4 * * *', guardedJob(async () => {
         try {
           await runGrowthEngine();
         } catch (err) {
           console.error('[GROWTH ERROR]', err);
           captureException(err, { tags: { cron: 'growth_engine' } });
         }
-      });
+      }));
 
       growthWarmupTimer = setTimeout(() => {
-        runGrowthEngine().catch(console.error);
+        guardedJob(runGrowthEngine)().catch(console.error);
       }, 60_000);
 
       // [Consultor · 1C] Cron de reconciliação de chat (backstop definitivo, D1C-5/D1C-9).
       // Resiliente: runChatReconciliationCron isola cada usuário em try/catch (um usuário nunca
       // aborta o lote). try/catch externo segue o padrão dos demais crons (não re-lança).
-      cron.schedule('*/5 * * * *', async () => {
+      cron.schedule('*/5 * * * *', guardedJob(async () => {
         try {
           const r = await runChatReconciliationCron(prisma, { metrics: chatMetrics });
           if (r.refunded > 0 || r.failedUsers > 0) {
@@ -1404,10 +1401,10 @@ async function startServer() {
           console.error('[Consultor reconcile] erro inesperado:', err && err.message);
           captureException(err, { tags: { cron: 'chat_reconcile' } });
         }
-      });
+      }));
 
       // Open Finance: verificar consentimentos expirados diariamente às 2h
-      cron.schedule('0 2 * * *', async () => {
+      cron.schedule('0 2 * * *', guardedJob(async () => {
         try {
           const count = await checkConsentExpiry();
           if (count > 0) console.log(`[OpenFinance] ${count} consentimentos marcados como expirados.`);
@@ -1415,12 +1412,12 @@ async function startServer() {
           console.error('[OpenFinance] Erro no job de expiração:', err.message);
           captureException(err, { tags: { cron: 'open_finance_consent_expiry' } });
         }
-      });
+      }));
 
       // [LGPD Art. 15] Retenção de dados: limpar Events, AuthCodes e Sessions expiradas semanalmente.
       // [FASE 6] Session cleanup: remove tanto expiradas naturalmente quanto revogadas
       // (revogadas mantemos por curto prazo apenas para auditoria — 7d após revogação).
-      cron.schedule('0 3 * * 0', async () => {
+      cron.schedule('0 3 * * 0', guardedJob(async () => {
         try {
           const now = new Date();
           const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
@@ -1442,7 +1439,7 @@ async function startServer() {
           console.error('[LGPD Retention] Erro na limpeza:', err.message);
           captureException(err, { tags: { cron: 'lgpd_retention' } });
         }
-      });
+      }));
     });
   } catch (error) {
     console.error('❌ ERRO CRÍTICO NO STARTUP:', error.message);

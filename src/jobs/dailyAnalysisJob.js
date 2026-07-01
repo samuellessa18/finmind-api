@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const prisma = require('../../prisma/client');
+const { guardedJob } = require('../lib/jobTracker'); // [F0.2A] rastreio p/ graceful shutdown
 const { calculateSummary, detectCategorySuggestions, scoreFromUserData, computeBudgetConsumption } = require('../engine/financialEngine');
 const { getEmotionalAnalyticsSummary } = require('../analytics/behaviorMetrics');
 // [FASE 5] Substituído coachEngine.generateDailyCoach por insightGenerator.
@@ -300,9 +301,9 @@ async function runDailyAnalysis() {
 
 function startDailyAnalysisJob() {
   console.log('[CronJobs] Iniciando agendador de análises...');
-  cron.schedule('0 6 * * *', async () => {
+  cron.schedule('0 6 * * *', guardedJob(async () => {
     await runDailyAnalysis();
-  });
+  }));
   console.log('[CronJobs] Job diário agendado para as 06:00');
 }
 

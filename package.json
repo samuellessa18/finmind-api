@@ -9,9 +9,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test test/e2/all.test.js test/1c/all.test.js",
+    "test": "node --test test/e2/all.test.js test/1c/all.test.js test/f0/all.test.js",
     "test:e2": "node --test --test-concurrency=1 test/e2/all.test.js",
     "test:1c": "node --test test/1c/all.test.js",
+    "test:f0": "node --test test/f0/all.test.js",
     "build": "npx prisma generate --schema=./prisma/schema.prisma && npx prisma migrate deploy --schema=./prisma/schema.prisma",
     "validate": "node scripts/validate.js",
     "check": "node scripts/validate.js",
