@@ -27,7 +27,9 @@ services:
     buildCommand: npm install && npx prisma generate --schema=./prisma/schema.prisma && npx prisma migrate deploy --schema=./prisma/schema.prisma
 
     startCommand: node src/server.js
-    healthCheckPath: /api/health
+    # [F0] Liveness (sem dependências externas). Antes: /api/health, que chamava a OpenAI
+    # a cada probe — acoplava a saúde do serviço a um terceiro.
+    healthCheckPath: /api/health/live
 
     envVars:
       - key: NODE_ENV
@@ -54,6 +56,20 @@ services:
         sync: false   # Gerar: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
       - key: GROWTH_ROLLOUT_PERCENTAGE
         value: "10"
+
+      # [F0] Open Finance (Pluggy) + cifra — OBRIGATÓRIAS no guard de boot (REQUIRED_ENV
+      # em src/server.js). Sem elas o startup aborta (process.exit 1). Declaradas para que
+      # a recriação via blueprint reproduza o serviço; valores no painel (sync:false).
+      - key: PLUGGY_CLIENT_ID
+        sync: false
+      - key: PLUGGY_CLIENT_SECRET
+        sync: false
+      - key: PLUGGY_WEBHOOK_SECRET
+        sync: false
+      - key: PLUGGY_WEBHOOK_URL
+        sync: false   # http(s):// válido — validado estruturalmente no boot
+      - key: ENCRYPTION_KEY
+        sync: false   # 64 hex (32 bytes): node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
       # [FASE 4] Observabilidade — opcional. Sem DSN, Sentry no-op.
       - key: SENTRY_DSN

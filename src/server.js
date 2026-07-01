@@ -362,6 +362,24 @@ app.get('/api/health', async (req, res) => {
   res.status(health.success ? 200 : 503).json(health);
 });
 
+// [F0] Liveness — o processo está vivo? NÃO consulta DB nem dependências externas.
+// É este o endpoint que o Render deve sondar (restart-probe): responder 200 mesmo com o
+// DB indisponível evita reciclagens desnecessárias por lentidão de dependência.
+app.get('/api/health/live', (req, res) => {
+  res.status(200).json({ status: 'ok', check: 'liveness', timestamp: new Date().toISOString() });
+});
+
+// [F0] Readiness — o processo está apto a servir tráfego? Checa SOMENTE a dependência
+// crítica (banco). JAMAIS chama OpenAI/Anthropic — prontidão não deve depender de terceiros.
+app.get('/api/health/ready', async (req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return res.status(200).json({ status: 'ready', checks: { database: 'connected' }, timestamp: new Date().toISOString() });
+  } catch {
+    return res.status(503).json({ status: 'not_ready', checks: { database: 'error' }, timestamp: new Date().toISOString() });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────
 // 10. SCHEMAS ZOD
 // ─────────────────────────────────────────────────────────────
@@ -1273,6 +1291,55 @@ process.on('unhandledRejection', async (reason) => {
   process.exit(1);
 });
 
+// [F0] Graceful shutdown — o Render envia SIGTERM em todo deploy/restart/scale-down.
+// Sem isto o processo é morto sujo: conexões HTTP em voo abortadas, crons no meio e
+// prisma sem $disconnect. Sequência: parar timers/crons → drenar HTTP → fechar Prisma →
+// flush Sentry → exit(0). Idempotente e com hard-timeout de fallback.
+let httpServer = null;
+let growthWarmupTimer = null;
+let shuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[shutdown] Sinal ${signal} recebido — encerrando graciosamente...`);
+
+  // Se o drain travar, força a saída para não deixar o Render matar o processo sujo.
+  const forceTimer = setTimeout(() => {
+    console.error('[shutdown] Timeout de drain (10s) — forçando saída.');
+    process.exit(1);
+  }, 10_000);
+  if (forceTimer && typeof forceTimer.unref === 'function') forceTimer.unref();
+
+  try {
+    // 1) Parar timers/crons: não aceitar novo trabalho agendado.
+    try { for (const task of cron.getTasks().values()) { try { task.stop(); } catch (_) {} } } catch (_) {}
+    if (growthWarmupTimer) { try { clearTimeout(growthWarmupTimer); } catch (_) {} }
+
+    // 2) Parar de aceitar novas conexões HTTP e drenar as em voo.
+    if (httpServer) {
+      await new Promise((resolve) => httpServer.close(() => resolve()));
+      console.log('[shutdown] HTTP server fechado (conexões drenadas).');
+    }
+
+    // 3) Fechar o pool do Prisma.
+    try { await prisma.$disconnect(); console.log('[shutdown] Prisma desconectado.'); } catch (_) {}
+
+    // 4) Flush do Sentry (no-op se DSN ausente).
+    try { await flushSentry(2000); } catch (_) {}
+
+    clearTimeout(forceTimer);
+    console.log('[shutdown] Encerramento limpo. Saindo (0).');
+    process.exit(0);
+  } catch (err) {
+    console.error('[shutdown] Erro durante shutdown:', err && err.message);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // ─────────────────────────────────────────────────────────────
 // 16. STARTUP
 // ─────────────────────────────────────────────────────────────
@@ -1289,10 +1356,10 @@ async function startServer() {
     await prisma.$connect();
     console.log('✅ Conexão com PostgreSQL estabelecida.');
 
-    app.listen(PORT, () => {
+    httpServer = app.listen(PORT, () => {
       console.log('──────────────────────────────────────');
       console.log(`🚀 FinMind API iniciada na porta ${PORT}`);
-      console.log(`📍 Health: /api/health`);
+      console.log(`📍 Health: /api/health/live (liveness) · /api/health/ready (readiness)`);
       console.log('──────────────────────────────────────');
 
       startDailyAnalysisJob();
@@ -1308,7 +1375,7 @@ async function startServer() {
         }
       });
 
-      setTimeout(() => {
+      growthWarmupTimer = setTimeout(() => {
         runGrowthEngine().catch(console.error);
       }, 60_000);
 
