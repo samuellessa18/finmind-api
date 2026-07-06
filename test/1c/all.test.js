@@ -16,3 +16,4 @@ require('./replay')(ctx);
 require('./gates')(ctx);
 require('./cron')(ctx);
 require('./route')(ctx);
+require('./consentRoute')(ctx); // [G1] consent grant/revoke

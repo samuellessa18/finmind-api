@@ -17,6 +17,7 @@ const { createHttpSse } = require('../services/conversation/sse');
 const { startHeartbeat } = require('../services/conversation/heartbeat');
 const orchestratorConfig = require('../config/chatOrchestratorConfig');
 const { httpStatusForError } = require('../services/chat/chatErrors');
+const { grantChatConsent, revokeChatConsent } = require('../services/conversation/consentService');
 
 const turnSchema = z.object({
   conversationId: z.string().min(1).max(64),
@@ -109,11 +110,39 @@ function makeTurnHandler(deps) {
   };
 }
 
+// [Consultor · G1] Handlers de consent ai_chat (grant/revoke). Escopo SEMPRE por req.user.id (D1C-6),
+// NUNCA por body. consentGate permanece read-only; a escrita vive em consentService (find-guard/updateMany).
+function makeConsentGrantHandler(deps) {
+  const { prisma } = deps;
+  return async function consentGrantHandler(req, res, next) {
+    try {
+      await grantChatConsent(prisma, req.user.id); // req.user.id do token; body ignorado
+      return res.status(200).json({ scope: 'ai_chat', status: 'granted' });
+    } catch (e) { return next(e); }
+  };
+}
+
+function makeConsentRevokeHandler(deps) {
+  const { prisma } = deps;
+  return async function consentRevokeHandler(req, res, next) {
+    try {
+      await revokeChatConsent(prisma, req.user.id);
+      return res.status(200).json({ scope: 'ai_chat', status: 'revoked' });
+    } catch (e) { return next(e); }
+  };
+}
+
 function createConversationRouter(deps) {
   const express = require('express');
   const router = express.Router();
   router.post('/conversations/turn', authenticateToken, makeTurnHandler(deps));
+  // [Consultor · G1] Consent ai_chat — aditivo; linha do /turn intocada. Escopo por req.user.id.
+  router.post('/conversations/consent', authenticateToken, makeConsentGrantHandler(deps));
+  router.delete('/conversations/consent', authenticateToken, makeConsentRevokeHandler(deps));
   return router;
 }
 
-module.exports = { createConversationRouter, makeTurnHandler, turnSchema, derivePlan, bodyForResult };
+module.exports = {
+  createConversationRouter, makeTurnHandler, makeConsentGrantHandler, makeConsentRevokeHandler,
+  turnSchema, derivePlan, bodyForResult,
+};
