@@ -132,6 +132,23 @@ function makeConsentRevokeHandler(deps) {
   };
 }
 
+// [Consultor · F0] Criação de conversa — endpoint dedicado (Alt. B aprovada; criação implícita no /turn
+// foi descartada). SÓ cria a ChatConversation do usuário autenticado: NÃO cria turn/mensagem, NÃO chama
+// LLM/tools/provider, NÃO gera SSE, NÃO consome cota. Escopo SEMPRE por req.user.id (tenant isolation);
+// body ignorado (title nasce null). Não toca /turn, turnSchema, runTurn, SSE nem o motor.
+function makeCreateConversationHandler(deps) {
+  const { prisma } = deps;
+  return async function createConversationHandler(req, res, next) {
+    try {
+      const conv = await prisma.chatConversation.create({
+        data: { userId: req.user.id }, // id=cuid, createdAt=now, updatedAt auto, title=null, archivedAt=null
+        select: { id: true, createdAt: true, title: true },
+      });
+      return res.status(201).json({ conversationId: conv.id, createdAt: conv.createdAt, title: conv.title });
+    } catch (e) { return next(e); }
+  };
+}
+
 function createConversationRouter(deps) {
   const express = require('express');
   const router = express.Router();
@@ -139,10 +156,13 @@ function createConversationRouter(deps) {
   // [Consultor · G1] Consent ai_chat — aditivo; linha do /turn intocada. Escopo por req.user.id.
   router.post('/conversations/consent', authenticateToken, makeConsentGrantHandler(deps));
   router.delete('/conversations/consent', authenticateToken, makeConsentRevokeHandler(deps));
+  // [Consultor · F0] Criação de conversa — aditivo; /turn e /consent intocados. Rota distinta (/conversations).
+  router.post('/conversations', authenticateToken, makeCreateConversationHandler(deps));
   return router;
 }
 
 module.exports = {
   createConversationRouter, makeTurnHandler, makeConsentGrantHandler, makeConsentRevokeHandler,
+  makeCreateConversationHandler,
   turnSchema, derivePlan, bodyForResult,
 };
