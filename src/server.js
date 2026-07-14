@@ -155,6 +155,9 @@ const { runChatReconciliationCron } = require('./jobs/chatReconciliationCron');
 // [Consultor · 1D] Observabilidade da ativação: endpoint admin de métricas + amostragem de drift no cron.
 const { createChatMetricsRouter } = require('./routes/chatMetricsRoutes');
 const { computeDriftSnapshot, isDriftNonZero } = require('./services/conversation/driftGauge');
+// [Consultor · F4.8] Observabilidade (ADITIVA): módulo de métricas/tracing + middleware HTTP.
+const { chatObservability } = require('./services/conversation/chatObservability');
+const { chatObservabilityMiddleware } = require('./middleware/chatObservabilityMiddleware');
 const { describeGate: describeChatGate } = require('./config/chatProviderConfig');
 // [F0.2A] Hardening do shutdown/health.
 const { runShutdown } = require('./lib/gracefulShutdown');
@@ -1230,6 +1233,9 @@ app.use('/api/v1', v1Router);
 // [Consultor · 1C] POST /api/v1/conversations/turn — orquestração sobre o motor E2 congelado.
 // Provider de chat DORMENTE (gated LGPD): responde 503 chat_unavailable até a ativação funcional.
 const chatRateLimiter = createRateLimiter();
+// [Consultor · F4.8] Observabilidade HTTP — envolve as rotas do consultor ANTES do router (aditivo;
+// NÃO toca o router, o SSE nem os handlers). Só observa requestId/latência/status/erro e métricas.
+app.use('/api/v1/conversations', chatObservabilityMiddleware(chatObservability));
 app.use('/api/v1', createConversationRouter({
   prisma,
   rateLimiter: chatRateLimiter,

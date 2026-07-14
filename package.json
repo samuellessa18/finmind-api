@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test test/e2/all.test.js test/1c/all.test.js test/1d/all.test.js test/f0/all.test.js test/http/httpInfra.test.js",
+    "test": "node --test test/e2/all.test.js test/1c/all.test.js test/1d/all.test.js test/f0/all.test.js test/http/httpInfra.test.js test/http/chatObservability.test.js",
     "test:e2": "node --test --test-concurrency=1 test/e2/all.test.js",
     "test:1c": "node --test test/1c/all.test.js",
     "test:f0": "node --test test/f0/all.test.js",
